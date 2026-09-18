@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  nginx-builder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nginx-builder:latest
+    container_name: nginx-builder
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    environment:
+      - PORT=8090
+      - DATA_DIR=/app/data
+      - MAX_CONCURRENT_JOBS=2
+      - JOB_TIMEOUT_MINUTES=20
+    volumes:
+      - builder-data:/app/data
+
+volumes:
+  builder-data:

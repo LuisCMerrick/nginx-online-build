@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title data-i18n="header_title">Nginx Online Web Builder</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23009639'><path d='M12 2L2 7v10l10 5 10-5V7L12 2zm0 2.8l7 3.5v7.4l-7 3.5-7-3.5V8.3l7-3.5z'/></svg>">
+</head>
+<body>
+  <div class="app-container">
+    <!-- 顶部导航栏 -->
+    <header class="header">
+      <div class="logo-area">
+        <svg class="nginx-logo" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 2L2 7v10l10 5 10-5V7L12 2zm0 2.8l7 3.5v7.4l-7 3.5-7-3.5V8.3l7-3.5z"/>
+        </svg>
+        <div class="title-group">
+          <h1 data-i18n="header_title">Nginx Online Web Builder</h1>
+          <span class="subtitle" data-i18n="header_subtitle">Cloud Native Nginx Builder · Go Engine</span>
+        </div>
+      </div>
+      <div class="header-status">
+        <div class="badge-tag" id="current-version-badge" data-i18n="badge_detecting">Detecting version...</div>
+        <div class="badge-tag live" id="arch-badge">Linux / arm64</div>
+        <!-- 语言切换器 Language Switcher -->
+        <div class="lang-switch-wrap">
+          <select id="lang-select" class="lang-select" aria-label="Language Selector">
+            <option value="en">English</option>
+            <option value="zh">简体中文</option>
+          </select>
+        </div>
+      </div>
+    </header>
+
+    <main class="main-content">
+      <!-- 左侧：参数选择与配置区 -->
+      <section class="left-pane">
+        <!-- 版本与目标设置 -->
+        <div class="card">
+          <div class="card-header">
+            <span class="step-num">1</span>
+            <h2 data-i18n="step_1_title">Select Nginx Version</h2>
+          </div>
+          <div class="card-body">
+            <div class="form-row">
+              <div class="form-group flex-1">
+                <label for="version-select" data-i18n="label_version">Nginx Official Release Version:</label>
+                <select id="version-select" class="custom-select">
+                  <option value="stable">Loading...</option>
+                </select>
+              </div>
+              <div class="version-meta" id="version-meta">
+                <span class="meta-item"><span data-i18n="meta_channel">Channel</span>: <strong id="meta-channel">-</strong></span>
+                <span class="meta-item"><span data-i18n="meta_sha256">SHA256</span>: <code id="meta-sha256">-</code></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 编译参数选择 -->
+        <div class="card">
+          <div class="card-header flex-between">
+            <div class="header-left">
+              <span class="step-num">2</span>
+              <h2 data-i18n="step_2_title">Official Modules & Features</h2>
+            </div>
+            <div class="header-actions">
+              <button class="btn btn-sm btn-ghost" id="btn-select-all" data-i18n="btn_presets">Presets</button>
+              <button class="btn btn-sm btn-ghost" id="btn-reset-default" data-i18n="btn_reset">Reset Defaults</button>
+            </div>
+          </div>
+
+          <!-- 分类标签页导航 -->
+          <div class="category-tabs" id="category-tabs">
+            <!-- 动态生成类别 -->
+          </div>
+
+          <!-- 选项面板 -->
+          <div class="card-body options-container" id="options-container">
+            <!-- 动态渲染参数复选框 -->
+          </div>
+        </div>
+
+        <!-- 第三方源码静态集成配置 (OpenSSL / PCRE / zlib) -->
+        <div class="card" id="deps-card">
+          <div class="card-header flex-between">
+            <div class="header-left">
+              <span class="step-num">3</span>
+              <h2 data-i18n="step_3_title">Third-Party Source Embedding (Optional)</h2>
+            </div>
+            <span class="badge" id="deps-status-badge" data-i18n="system_libs_badge">System Shared Libraries</span>
+          </div>
+          <div class="card-body">
+            <p class="text-secondary text-sm" style="margin-bottom: 14px; font-size: 0.8rem; color: var(--text-secondary);" data-i18n="step_3_desc">
+              Download and compile third-party libraries statically into Nginx binary without system dependencies.
+            </p>
+
+            <!-- OpenSSL 源码选项 -->
+            <div class="dep-block">
+              <div class="dep-header">
+                <label class="checkbox-inline">
+                  <input type="checkbox" id="enable-openssl-src">
+                  <strong data-i18n="dep_openssl_title">Embed OpenSSL Source</strong>
+                  <code class="flag-tag">--with-openssl</code>
+                </label>
+              </div>
+              <div class="dep-body hidden" id="openssl-options-panel">
+                <div class="form-row" style="margin-top: 10px;">
+                  <div class="form-group flex-1">
+                    <label for="openssl-version-select" data-i18n="dep_openssl_ver">OpenSSL Version:</label>
+                    <select id="openssl-version-select" class="custom-select">
+                      <option value="3.4.1">OpenSSL 3.4.1 (Mainline / Recommended)</option>
+                      <option value="3.0.16">OpenSSL 3.0.16 (LTS)</option>
+                      <option value="1.1.1w">OpenSSL 1.1.1w (Legacy)</option>
+                      <option value="custom">Custom Source URL</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="form-group hidden" id="openssl-custom-url-group" style="margin-top: 8px;">
+                  <label for="openssl-custom-url" data-i18n="dep_openssl_custom">Custom OpenSSL .tar.gz URL:</label>
+                  <input type="text" id="openssl-custom-url" class="form-input" placeholder="https://example.com/openssl.tar.gz">
+                </div>
+                <div class="form-group" style="margin-top: 8px;">
+                  <label for="openssl-opt" data-i18n="dep_openssl_opt">Extra OpenSSL Build Flags (--with-openssl-opt):</label>
+                  <input type="text" id="openssl-opt" class="form-input" placeholder="e.g.: enable-tls1_3 no-tests">
+                </div>
+              </div>
+            </div>
+
+            <!-- PCRE2 源码选项 -->
+            <div class="dep-block" style="margin-top: 14px;">
+              <div class="dep-header">
+                <label class="checkbox-inline">
+                  <input type="checkbox" id="enable-pcre-src">
+                  <strong data-i18n="dep_pcre_title">Embed PCRE Source</strong>
+                  <code class="flag-tag">--with-pcre</code>
+                </label>
+              </div>
+              <div class="dep-body hidden" id="pcre-options-panel">
+                <div class="form-row" style="margin-top: 10px;">
+                  <div class="form-group flex-1">
+                    <label for="pcre-version-select" data-i18n="dep_pcre_ver">PCRE Version:</label>
+                    <select id="pcre-version-select" class="custom-select">
+                      <option value="10.45">PCRE2 10.45 (Mainline / Recommended)</option>
+                      <option value="10.42">PCRE2 10.42 (Stable)</option>
+                      <option value="custom">Custom Source URL</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="form-group hidden" id="pcre-custom-url-group" style="margin-top: 8px;">
+                  <label for="pcre-custom-url" data-i18n="dep_pcre_custom">Custom PCRE2 .tar.gz URL:</label>
+                  <input type="text" id="pcre-custom-url" class="form-input" placeholder="https://example.com/pcre2.tar.gz">
+                </div>
+                <div class="form-group" style="margin-top: 8px;">
+                  <label for="pcre-opt" data-i18n="dep_pcre_opt">Extra PCRE Build Flags (--with-pcre-opt):</label>
+                  <input type="text" id="pcre-opt" class="form-input" placeholder="e.g.: --enable-jit">
+                </div>
+              </div>
+            </div>
+
+            <!-- zlib 源码选项 -->
+            <div class="dep-block" style="margin-top: 14px;">
+              <div class="dep-header">
+                <label class="checkbox-inline">
+                  <input type="checkbox" id="enable-zlib-src">
+                  <strong data-i18n="dep_zlib_title">Embed zlib Source</strong>
+                  <code class="flag-tag">--with-zlib</code>
+                </label>
+              </div>
+              <div class="dep-body hidden" id="zlib-options-panel">
+                <div class="form-row" style="margin-top: 10px;">
+                  <div class="form-group flex-1">
+                    <label for="zlib-version-select" data-i18n="dep_zlib_ver">zlib Version:</label>
+                    <select id="zlib-version-select" class="custom-select">
+                      <option value="1.3.1">zlib 1.3.1 (Latest)</option>
+                      <option value="custom">Custom Source URL</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="form-group hidden" id="zlib-custom-url-group" style="margin-top: 8px;">
+                  <label for="zlib-custom-url" data-i18n="dep_zlib_custom">Custom zlib .tar.gz URL:</label>
+                  <input type="text" id="zlib-custom-url" class="form-input" placeholder="https://example.com/zlib.tar.gz">
+                </div>
+                <div class="form-group" style="margin-top: 8px;">
+                  <label for="zlib-opt" data-i18n="dep_zlib_opt">Extra zlib Build Flags (--with-zlib-opt):</label>
+                  <input type="text" id="zlib-opt" class="form-input" placeholder="e.g.: -O3">
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- 高级路径设置 -->
+        <div class="card collapsed" id="paths-card">
+          <div class="card-header flex-between clickable" id="toggle-paths">
+            <div class="header-left">
+              <span class="step-num">4</span>
+              <h2 data-i18n="step_4_title">Advanced Installation Paths (Optional)</h2>
+            </div>
+            <span class="toggle-icon">▼</span>
+          </div>
+          <div class="card-body path-form-grid" id="paths-body">
+            <!-- 动态渲染路径参数 -->
+          </div>
+        </div>
+      </section>
+
+      <!-- 右侧：命令预览、提交与实时构建监控 -->
+      <section class="right-pane">
+        <!-- 编译命令预览 -->
+        <div class="card">
+          <div class="card-header flex-between">
+            <div class="header-left">
+              <span class="step-num">5</span>
+              <h2 data-i18n="step_5_title">./configure Command Preview</h2>
+            </div>
+            <span class="badge" id="preview-args-count">0 selected</span>
+          </div>
+          <div class="card-body">
+            <div class="code-preview-wrap">
+              <pre><code id="configure-preview">./configure</code></pre>
+              <button class="copy-btn" id="copy-preview-btn" data-i18n="btn_copy" title="Copy Command">Copy</button>
+            </div>
+            <div class="warning-box hidden" id="preview-warnings"></div>
+            <div class="warning-box hidden" id="preview-conflicts" style="background: rgba(245, 158, 11, 0.1); border-color: rgba(245, 158, 11, 0.35); color: #fbbf24; margin-top: 10px;"></div>
+            <div class="submit-action">
+              <button class="btn btn-primary btn-large btn-glow" id="start-build-btn">
+                <span class="btn-icon">⚡</span>
+                <span class="btn-text" data-i18n="btn_start_build">Build Nginx Now</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 任务状态与终端日志 -->
+        <div class="card" id="build-status-card">
+          <div class="card-header flex-between">
+            <div class="header-left">
+              <span class="step-num">5</span>
+              <h2 data-i18n="pipeline_title">Build Pipeline & Live Logs</h2>
+            </div>
+            <div class="status-badge-container">
+              <span class="status-badge" id="task-status-pill" data-i18n="status_idle">Idle</span>
+            </div>
+          </div>
+
+          <div class="card-body">
+            <!-- 阶段进度条 -->
+            <div class="pipeline-flow">
+              <div class="pipeline-step" data-step="queued">
+                <div class="step-dot"></div>
+                <div class="step-label" data-i18n="step_queued">Queued</div>
+              </div>
+              <div class="pipeline-line"></div>
+              <div class="pipeline-step" data-step="downloading">
+                <div class="step-dot"></div>
+                <div class="step-label" data-i18n="step_downloading">Source Check</div>
+              </div>
+              <div class="pipeline-line"></div>
+              <div class="pipeline-step" data-step="configuring">
+                <div class="step-dot"></div>
+                <div class="step-label" data-i18n="step_configuring">Configure</div>
+              </div>
+              <div class="pipeline-line"></div>
+              <div class="pipeline-step" data-step="building">
+                <div class="step-dot"></div>
+                <div class="step-label" data-i18n="step_building">Compiling</div>
+              </div>
+              <div class="pipeline-line"></div>
+              <div class="pipeline-step" data-step="packaging">
+                <div class="step-dot"></div>
+                <div class="step-label" data-i18n="step_packaging">Verification</div>
+              </div>
+              <div class="pipeline-line"></div>
+              <div class="pipeline-step" data-step="completed">
+                <div class="step-dot"></div>
+                <div class="step-label" data-i18n="step_completed">Completed</div>
+              </div>
+            </div>
+
+            <!-- 详细构建指标 -->
+            <div class="build-metrics-grid" id="build-metrics">
+              <div class="metric-card">
+                <span class="label" data-i18n="metric_task_id">Task ID:</span>
+                <code class="val" id="val-build-id">--</code>
+              </div>
+              <div class="metric-card">
+                <span class="label" data-i18n="metric_step">Current Step:</span>
+                <span class="val text-highlight" id="val-step" data-i18n="metric_waiting">Awaiting submission</span>
+              </div>
+              <div class="metric-card">
+                <span class="label" data-i18n="metric_elapsed">Duration:</span>
+                <span class="val" id="val-duration">0.0s</span>
+              </div>
+              <div class="metric-card">
+                <span class="label" data-i18n="metric_target">Target OS/Arch:</span>
+                <span class="val" id="val-platform">linux / arm64</span>
+              </div>
+            </div>
+
+            <!-- 构建成功产物下载卡片 -->
+            <div class="artifact-card hidden" id="artifact-card">
+              <div class="artifact-header">
+                <div class="success-icon">🎉</div>
+                <div class="artifact-meta">
+                  <h3 id="artifact-name">nginx-1.30.5-linux-arm64.tar.gz</h3>
+                  <p class="artifact-sha">SHA256: <code id="artifact-sha">--</code></p>
+                  <p class="artifact-size">Size: <span id="artifact-size">--</span></p>
+                </div>
+              </div>
+              <div class="artifact-action">
+                <a href="#" class="btn btn-success btn-large" id="artifact-download-link" download>
+                  <span class="btn-icon">⬇</span>
+                  <span data-i18n="btn_download">Download Binary Package (tar.gz)</span>
+                </a>
+              </div>
+              <!-- nginx -V 验证报告 -->
+              <div class="verify-box">
+                <div class="verify-title" data-i18n="verify_title">Artifact Compliance Audit (nginx -V):</div>
+                <pre><code id="verify-output">--</code></pre>
+              </div>
+            </div>
+
+            <!-- 实时日志终端 -->
+            <div class="terminal-container">
+              <div class="terminal-header flex-between">
+                <div class="terminal-title">
+                  <span class="term-dot red"></span>
+                  <span class="term-dot yellow"></span>
+                  <span class="term-dot green"></span>
+                  <span class="term-title-text" data-i18n="console_title">Build Console Output</span>
+                </div>
+                <div class="terminal-controls">
+                  <label class="autoscroll-toggle">
+                    <input type="checkbox" id="autoscroll-chk" checked> <span data-i18n="autoscroll">Autoscroll</span>
+                  </label>
+                  <button class="btn btn-xs btn-ghost" id="clear-term-btn" data-i18n="btn_clear">Clear</button>
+                </div>
+              </div>
+              <pre class="terminal-body" id="terminal-body">Waiting for build initialization...</pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- 历史构建记录 -->
+        <div class="card">
+          <div class="card-header flex-between">
+            <h2 data-i18n="history_title">Recent Builds</h2>
+            <button class="btn btn-sm btn-ghost" id="btn-refresh-history" data-i18n="btn_refresh">Refresh</button>
+          </div>
+          <div class="card-body">
+            <div class="history-table-wrap">
+              <table class="history-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th_build_id">Build ID</th>
+                    <th data-i18n="th_version">Version</th>
+                    <th data-i18n="th_status">Status</th>
+                    <th data-i18n="th_duration">Duration</th>
+                    <th data-i18n="th_created">Created At</th>
+                    <th data-i18n="th_action">Action</th>
+                  </tr>
+                </thead>
+                <tbody id="history-tbody">
+                  <tr><td colspan="6" class="text-center text-muted" data-i18n="no_history">No build records yet</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- 编译前互斥与优化提示确认弹窗 (用户点击立即编译时按需触发) -->
+  <div id="conflict-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <span class="modal-badge-warn" data-i18n="modal_warn_badge">Option Conflict Alert</span>
+          <h3 style="margin: 0; font-size: 16px; color: var(--text-primary);" data-i18n="modal_title">Option Conflicts Detected</h3>
+        </div>
+        <button class="modal-close-btn" id="modal-close-x" title="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-desc" style="color: var(--text-secondary); margin-bottom: 12px; font-size: 13px;" data-i18n="modal_desc">
+          The currently selected configure options contain the following mutual exclusion conflicts:
+        </p>
+        <div class="conflict-list-box" id="modal-conflict-list" style="margin-bottom: 14px;">
+          <!-- 动态渲染冲突项 -->
+        </div>
+        <div class="modal-advice" style="background: rgba(0, 150, 57, 0.1); border: 1px solid rgba(0, 150, 57, 0.3); border-radius: 6px; padding: 10px 12px; font-size: 12px; color: #34d399; line-height: 1.5;" data-i18n-html="modal_advice">
+          <strong>Smart Recommendation:</strong> Click "Auto-Resolve & Build" below. The system will retain primary functional modules, safely remove contradictory exclusion flags, satisfy missing dependencies, and start the build immediately.
+        </div>
+      </div>
+      <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px;">
+        <button class="btn btn-secondary" id="modal-cancel-btn" data-i18n="btn_cancel_modify">Modify Options</button>
+        <button class="btn btn-primary" id="modal-confirm-btn" data-i18n="btn_auto_build">Auto-Resolve & Build</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="i18n.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

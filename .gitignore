@@ -1,0 +1,19 @@
+# Binaries and build output
+bin/
+server
+*.exe
+*.test
+*.out
+
+# Runtime data & workspaces
+data/
+build/
+builds/
+cache/
+
+# System and editor files
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
