@@ -75,6 +75,36 @@
 
 ---
 
+## 💻 CLI 命令行参数说明
+
+`nginx-builder` 原生支持丰富的命令行启动参数，CLI 终端模式下纯英文输出：
+
+```bash
+Usage:
+  nginx-builder [options]
+
+Options:
+  -h, --host <ip>        Server listen host/address (default: "0.0.0.0", env: HOST)
+  -p, --port <port>      Server listen port (default: "8090", env: PORT)
+  -d, --data-dir <path>  Working data directory for builds and cache (default: "./data", env: DATA_DIR)
+  -j, --jobs <n>         Max concurrent compilation jobs (default: 2, env: MAX_CONCURRENT_JOBS)
+  -t, --timeout <min>    Job execution timeout in minutes (default: 20, env: JOB_TIMEOUT_MINUTES)
+  -v, --version          Display version information and exit
+      --help             Display this help message and exit
+```
+
+### 常用启动示例
+
+```bash
+# 指定仅监听本地回环地址与 9000 端口
+./bin/nginx-builder -host 127.0.0.1 -port 9000
+
+# 自定义数据存储目录与 4 个并发编译 Worker
+./bin/nginx-builder -data-dir /var/lib/nginx-builder -jobs 4 -timeout 30
+```
+
+---
+
 ## 🐳 Docker 快速启动
 
 ```bash

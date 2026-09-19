@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"net"
 	"net/http"
 	"nginx-builder/internal/builder"
 	"nginx-builder/internal/config"
@@ -12,14 +13,17 @@ import (
 
 func main() {
 	cfg := config.LoadConfig()
+
+	addr := net.JoinHostPort(cfg.Host, cfg.Port)
+
 	log.Printf("--------------------------------------------------")
-	log.Printf("🚀 Nginx 在线编译工具启动中...")
-	log.Printf("数据存储路径: %s", cfg.DataDir)
-	log.Printf("编译工作目录: %s", cfg.BuildDir)
-	log.Printf("源码缓存目录: %s", cfg.CacheDir)
-	log.Printf("最大并发编译任务数: %d", cfg.MaxConcurrentJobs)
-	log.Printf("单任务超时时间: %v", cfg.JobTimeout)
-	log.Printf("服务监听端口: %s", cfg.Port)
+	log.Printf("🚀 Starting Nginx Online Web Builder v%s...", config.AppVersion)
+	log.Printf("Data storage path:     %s", cfg.DataDir)
+	log.Printf("Compilation workspace: %s", cfg.BuildDir)
+	log.Printf("Source tarball cache:  %s", cfg.CacheDir)
+	log.Printf("Max concurrent jobs:   %d", cfg.MaxConcurrentJobs)
+	log.Printf("Job execution timeout: %v", cfg.JobTimeout)
+	log.Printf("Target bind address:   http://%s", addr)
 	log.Printf("--------------------------------------------------")
 
 	mgr := builder.NewManager(cfg)
@@ -39,10 +43,9 @@ func main() {
 		fileServer.ServeHTTP(w, r)
 	})
 
-	addr := ":" + cfg.Port
-	log.Printf("✔ Web 服务已就绪，正在监听 http://0.0.0.0:%s", cfg.Port)
+	log.Printf("✔ Web server is ready and listening on http://%s", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("服务退出异常: %v", err)
+		log.Fatalf("Server terminated with error: %v", err)
 		os.Exit(1)
 	}
 }

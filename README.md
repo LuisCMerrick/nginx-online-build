@@ -103,6 +103,36 @@ docker compose up -d
 
 ---
 
+## 💻 CLI Usage & Configuration
+
+`nginx-builder` provides a fully English CLI interface supporting custom host binding, port selection, workspace data directory, concurrency limits, and job timeouts:
+
+```bash
+Usage:
+  nginx-builder [options]
+
+Options:
+  -h, --host <ip>        Server listen host/address (default: "0.0.0.0", env: HOST)
+  -p, --port <port>      Server listen port (default: "8090", env: PORT)
+  -d, --data-dir <path>  Working data directory for builds and cache (default: "./data", env: DATA_DIR)
+  -j, --jobs <n>         Max concurrent compilation jobs (default: 2, env: MAX_CONCURRENT_JOBS)
+  -t, --timeout <min>    Job execution timeout in minutes (default: 20, env: JOB_TIMEOUT_MINUTES)
+  -v, --version          Display version information and exit
+      --help             Display this help message and exit
+```
+
+### Examples
+
+```bash
+# Listen on localhost port 9000 with custom data path
+./bin/nginx-builder -host 127.0.0.1 -port 9000 -data-dir /var/lib/nginx-builder
+
+# Configure 4 concurrent workers and 30-minute job timeout
+./bin/nginx-builder -jobs 4 -timeout 30
+```
+
+---
+
 ## 💻 Local Development & Build
 
 Requires **Go 1.22+** and standard compilation toolchain (`gcc`, `make`, `tar`, `curl`).
