@@ -21,6 +21,10 @@
         </div>
       </div>
       <div class="header-status">
+        <div class="badge-tag clickable" id="env-status-badge" title="Build Server Environment & Dependencies">
+          <span class="status-dot green" id="env-badge-dot"></span>
+          <span id="env-badge-text" data-i18n="env_checking">Checking Env...</span>
+        </div>
         <div class="badge-tag" id="current-version-badge" data-i18n="badge_detecting">Detecting version...</div>
         <div class="badge-tag live" id="arch-badge">Linux / arm64</div>
         <!-- 语言切换器 Language Switcher -->
@@ -36,6 +40,18 @@
     <main class="main-content">
       <!-- 左侧：参数选择与配置区 -->
       <section class="left-pane">
+        <!-- 缺失依赖提示横幅 (若有缺失项时动态展示) -->
+        <div id="missing-deps-banner" class="alert-banner hidden">
+          <div class="alert-content">
+            <span class="alert-icon">⚠️</span>
+            <div class="alert-text">
+              <strong data-i18n="env_banner_title">Missing Compilation Dependencies Detected on Server</strong>
+              <p id="missing-deps-desc" data-i18n="env_banner_desc">The build server is missing required compilers or libraries. Click to automatically install them.</p>
+            </div>
+          </div>
+          <button class="btn btn-sm btn-primary" id="banner-install-btn" data-i18n="btn_install_deps">One-Click Install Dependencies</button>
+        </div>
+
         <!-- 版本与目标设置 -->
         <div class="card">
           <div class="card-header">
@@ -398,6 +414,86 @@
       <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px;">
         <button class="btn btn-secondary" id="modal-cancel-btn" data-i18n="btn_cancel_modify">Modify Options</button>
         <button class="btn btn-primary" id="modal-confirm-btn" data-i18n="btn_auto_build">Auto-Resolve & Build</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 编译服务器环境与依赖诊断及一键安装弹窗 -->
+  <div id="env-modal" class="modal-overlay hidden">
+    <div class="modal-card" style="max-width: 720px;">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <span class="modal-badge-warn" id="env-modal-badge">Linux Server</span>
+          <h3 style="margin: 0; font-size: 16px; color: var(--text-primary);" data-i18n="env_modal_title">Build Server Environment & Dependencies</h3>
+        </div>
+        <button class="modal-close-btn" id="env-modal-close" title="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <!-- 发行版与系统元数据 -->
+        <div class="env-meta-grid" id="env-meta-grid">
+          <div class="env-meta-item">
+            <span class="label" data-i18n="env_distro">Linux Distro:</span>
+            <strong id="env-meta-distro">--</strong>
+          </div>
+          <div class="env-meta-item">
+            <span class="label" data-i18n="env_pkg_mgr">Package Manager:</span>
+            <code id="env-meta-pkg">--</code>
+          </div>
+          <div class="env-meta-item">
+            <span class="label" data-i18n="env_arch">Architecture:</span>
+            <span id="env-meta-arch">--</span>
+          </div>
+          <div class="env-meta-item">
+            <span class="label" data-i18n="env_perm">Install Privileges:</span>
+            <span id="env-meta-perm">--</span>
+          </div>
+        </div>
+
+        <!-- 依赖清单表格 -->
+        <div class="env-deps-table-wrap">
+          <table class="env-deps-table">
+            <thead>
+              <tr>
+                <th data-i18n="env_th_dep">Dependency Component</th>
+                <th data-i18n="env_th_type">Category</th>
+                <th data-i18n="env_th_pkg">Distro Package</th>
+                <th data-i18n="env_th_status">Status</th>
+              </tr>
+            </thead>
+            <tbody id="env-deps-tbody">
+              <!-- 动态填充依赖项 -->
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 提示框 / 待执行命令 -->
+        <div id="env-install-cmd-wrap" class="env-cmd-box hidden">
+          <div class="env-cmd-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <span data-i18n="env_cmd_title" style="font-size: 12px; color: var(--text-secondary);">Command Executed on Server:</span>
+            <button class="btn btn-xs btn-ghost" id="env-copy-cmd-btn" data-i18n="btn_copy">Copy</button>
+          </div>
+          <pre style="margin: 0; padding: 10px; background: var(--bg-terminal); border-radius: 6px; font-size: 12px; overflow-x: auto;"><code id="env-install-cmd">--</code></pre>
+        </div>
+
+        <!-- 实时安装终端日志 -->
+        <div id="env-terminal-wrap" class="terminal-container hidden" style="margin-top: 14px;">
+          <div class="terminal-header flex-between">
+            <span class="term-title-text" data-i18n="env_term_title">Package Manager Live Installation Console</span>
+            <span class="status-badge status-building" id="env-install-status-pill" data-i18n="btn_installing_deps">Installing...</span>
+          </div>
+          <pre class="terminal-body" id="env-terminal-body" style="height: 160px;"></pre>
+        </div>
+      </div>
+
+      <div class="modal-footer" style="display: flex; justify-content: space-between; align-items: center; margin-top: 16px;">
+        <button class="btn btn-secondary" id="env-recheck-btn">
+          <span class="btn-icon">🔄</span>
+          <span data-i18n="btn_recheck_deps">Recheck Environment</span>
+        </button>
+        <button class="btn btn-primary btn-glow" id="env-install-btn">
+          <span class="btn-icon">⚡</span>
+          <span data-i18n="btn_install_deps">One-Click Install Dependencies</span>
+        </button>
       </div>
     </div>
   </div>

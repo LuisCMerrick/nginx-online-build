@@ -71,6 +71,9 @@ A high-performance, secure, and cloud-native **Nginx Online Custom Compilation P
 | `/api/builds/{id}` | `GET` | Query detailed job status, metrics, and `nginx -V` verification results |
 | `/api/builds/{id}/logs` | `GET` | Stream live terminal output via SSE (`?stream=true`) or fetch raw logs |
 | `/api/builds/{id}/artifact` | `GET` | Download compiled and verified distribution package (`.tar.gz`) |
+| `/api/system/status` | `GET` | Check host Linux distro, package manager, and Nginx dependency status |
+| `/api/system/deps/install` | `POST` | Trigger automatic dependency package installation in background |
+| `/api/system/deps/logs` | `GET` | Stream live dependency installation output via SSE (`?stream=true`) |
 
 ---
 

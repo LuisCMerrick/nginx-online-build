@@ -52,6 +52,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   loadVersions();
   loadOptions();
   loadRecentBuilds();
+  loadSystemStatus();
 });
 
 function initEventListeners() {
@@ -731,3 +732,233 @@ async function loadRecentBuilds() {
     console.error("Load recent builds failed:", err);
   }
 }
+
+// ===================================================================
+// System Environment & Dependency Management (Multi-Distro Support)
+// ===================================================================
+
+let currentSystemStatus = null;
+let envLogSource = null;
+
+async function loadSystemStatus() {
+  try {
+    const resp = await fetch("/api/system/status");
+    const res = await resp.json();
+    if (!res.success || !res.data) return;
+
+    currentSystemStatus = res.data;
+    updateEnvUI(currentSystemStatus);
+  } catch (err) {
+    console.error("Failed to query system status:", err);
+  }
+}
+
+function updateEnvUI(data) {
+  const badgeDot = document.getElementById("env-badge-dot");
+  const badgeText = document.getElementById("env-badge-text");
+  const banner = document.getElementById("missing-deps-banner");
+  const bannerDesc = document.getElementById("missing-deps-desc");
+
+  if (data.all_installed) {
+    if (badgeDot) badgeDot.className = "status-dot green";
+    if (badgeText) badgeText.textContent = `${data.distro.distro_id} · ${t("env_status_ready", "Build Env Ready")}`;
+    if (banner) banner.classList.add("hidden");
+  } else {
+    if (badgeDot) badgeDot.className = "status-dot amber";
+    const msg = t("env_status_missing", "Missing {n} Dependencies (Click to Install)").replace("{n}", data.missing_count);
+    if (badgeText) badgeText.textContent = `${data.distro.distro_id} · ${msg}`;
+    
+    if (banner) {
+      banner.classList.remove("hidden");
+      if (bannerDesc) {
+        const missingNames = data.dependencies
+          .filter(d => !d.installed && d.required)
+          .map(d => d.package_name || d.name)
+          .join(", ");
+        bannerDesc.textContent = `${t("env_banner_desc", "Missing required build libraries/tools:")} ${missingNames}`;
+      }
+    }
+  }
+
+  // If modal is open, refresh its content
+  const modal = document.getElementById("env-modal");
+  if (modal && !modal.classList.contains("hidden")) {
+    renderEnvModalContent(data);
+  }
+}
+
+function openEnvModal() {
+  const modal = document.getElementById("env-modal");
+  if (!modal) return;
+  modal.classList.remove("hidden");
+
+  if (currentSystemStatus) {
+    renderEnvModalContent(currentSystemStatus);
+  } else {
+    loadSystemStatus();
+  }
+}
+
+function renderEnvModalContent(data) {
+  document.getElementById("env-meta-distro").textContent = data.distro.distro_name || data.distro.distro_id;
+  document.getElementById("env-meta-pkg").textContent = data.distro.package_manager;
+  document.getElementById("env-meta-arch").textContent = `${data.distro.os} / ${data.distro.arch}`;
+
+  const permEl = document.getElementById("env-meta-perm");
+  if (data.distro.is_root) {
+    permEl.className = "text-success";
+    permEl.textContent = `✔ ${t("env_perm_root", "Root User (One-click install supported)")}`;
+  } else if (data.distro.has_sudo) {
+    permEl.className = "text-success";
+    permEl.textContent = `✔ ${t("env_perm_sudo", "Passwordless Sudo (One-click install supported)")}`;
+  } else {
+    permEl.className = "text-warning";
+    permEl.textContent = `⚠️ ${t("env_perm_unprivileged", "Unprivileged (Manual command required)")}`;
+  }
+
+  // Render Dependencies table
+  const tbody = document.getElementById("env-deps-tbody");
+  tbody.innerHTML = "";
+
+  data.dependencies.forEach(d => {
+    const tr = document.createElement("tr");
+    const statusHtml = d.installed ? 
+      `<span class="badge-installed">✔ ${t("status_installed", "Installed")}${d.version ? ` (${d.version})` : ""}</span>` :
+      `<span class="badge-missing">⚠️ ${t("status_missing", "Missing")}</span>`;
+
+    let catLabel = t("tab_core_libs", "Core Libraries");
+    if (d.category === "toolchain") catLabel = t("tab_toolchain", "Build Toolchain");
+    if (d.category === "opt_lib") catLabel = t("tab_opt_libs", "Optional Modules");
+
+    tr.innerHTML = `
+      <td><strong>${d.name}</strong><br><small style="color:var(--text-muted)">${d.description}</small></td>
+      <td><span class="flag-tag">${catLabel}</span></td>
+      <td><code>${d.package_name}</code></td>
+      <td>${statusHtml}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  // Install command box
+  const cmdWrap = document.getElementById("env-install-cmd-wrap");
+  const cmdCode = document.getElementById("env-install-cmd");
+  if (data.install_command) {
+    cmdWrap.classList.remove("hidden");
+    cmdCode.textContent = data.install_command;
+  } else {
+    cmdWrap.classList.add("hidden");
+  }
+
+  // Install button state
+  const installBtn = document.getElementById("env-install-btn");
+  if (data.all_installed) {
+    installBtn.disabled = true;
+    installBtn.innerHTML = `<span class="btn-icon">✔</span><span>${t("status_installed", "All Dependencies Ready")}</span>`;
+    installBtn.style.opacity = "0.6";
+  } else if (data.is_installing) {
+    installBtn.disabled = true;
+    installBtn.innerHTML = `<span class="btn-icon">⏳</span><span>${t("btn_installing_deps", "Installing Dependencies...")}</span>`;
+  } else if (!data.distro.can_install) {
+    installBtn.disabled = true;
+    installBtn.innerHTML = `<span class="btn-icon">⚠️</span><span>${t("env_perm_unprivileged", "Manual Command Required")}</span>`;
+    installBtn.style.opacity = "0.7";
+  } else {
+    installBtn.disabled = false;
+    installBtn.innerHTML = `<span class="btn-icon">⚡</span><span>${t("btn_install_deps", "One-Click Install Dependencies")}</span>`;
+    installBtn.style.opacity = "1";
+  }
+}
+
+async function startInstallDeps() {
+  const installBtn = document.getElementById("env-install-btn");
+  installBtn.disabled = true;
+  installBtn.innerHTML = `<span class="btn-icon">⏳</span><span>${t("btn_installing_deps", "Installing Dependencies...")}</span>`;
+
+  const termWrap = document.getElementById("env-terminal-wrap");
+  const termBody = document.getElementById("env-terminal-body");
+  const statusPill = document.getElementById("env-install-status-pill");
+
+  termWrap.classList.remove("hidden");
+  termBody.textContent = `🚀 Starting system package installation on ${currentSystemStatus.distro.distro_name}...\n`;
+  statusPill.textContent = t("btn_installing_deps", "Installing...");
+
+  try {
+    const resp = await fetch("/api/system/deps/install", { method: "POST" });
+    const res = await resp.json();
+    if (!res.success) {
+      termBody.textContent += `❌ ${res.error || "Failed to trigger dependency installation"}\n`;
+      installBtn.disabled = false;
+      return;
+    }
+
+    // Connect SSE log stream
+    if (envLogSource) {
+      envLogSource.close();
+    }
+
+    envLogSource = new EventSource("/api/system/deps/logs?stream=true");
+    envLogSource.onmessage = (e) => {
+      termBody.textContent += e.data + "\n";
+      termBody.scrollTop = termBody.scrollHeight;
+    };
+
+    envLogSource.addEventListener("done", () => {
+      envLogSource.close();
+      statusPill.textContent = "Finished";
+      setTimeout(loadSystemStatus, 1000);
+    });
+
+    envLogSource.onerror = () => {
+      setTimeout(loadSystemStatus, 2000);
+    };
+
+  } catch (err) {
+    termBody.textContent += `❌ Network error: ${err.message}\n`;
+    installBtn.disabled = false;
+  }
+}
+
+// Wire Event Listeners for System Environment Management
+document.addEventListener("DOMContentLoaded", () => {
+  const envBadge = document.getElementById("env-status-badge");
+  if (envBadge) {
+    envBadge.addEventListener("click", openEnvModal);
+  }
+
+  const bannerInstallBtn = document.getElementById("banner-install-btn");
+  if (bannerInstallBtn) {
+    bannerInstallBtn.addEventListener("click", openEnvModal);
+  }
+
+  const envModalClose = document.getElementById("env-modal-close");
+  if (envModalClose) {
+    envModalClose.addEventListener("click", () => {
+      document.getElementById("env-modal").classList.add("hidden");
+    });
+  }
+
+  const envRecheckBtn = document.getElementById("env-recheck-btn");
+  if (envRecheckBtn) {
+    envRecheckBtn.addEventListener("click", async () => {
+      envRecheckBtn.disabled = true;
+      await loadSystemStatus();
+      envRecheckBtn.disabled = false;
+    });
+  }
+
+  const envInstallBtn = document.getElementById("env-install-btn");
+  if (envInstallBtn) {
+    envInstallBtn.addEventListener("click", startInstallDeps);
+  }
+
+  const copyCmdBtn = document.getElementById("env-copy-cmd-btn");
+  if (copyCmdBtn) {
+    copyCmdBtn.addEventListener("click", () => {
+      const code = document.getElementById("env-install-cmd").textContent;
+      navigator.clipboard.writeText(code).then(() => {
+        copyCmdBtn.textContent = t("copied", "Copied!");
+        setTimeout(() => { copyCmdBtn.textContent = t("btn_copy", "Copy"); }, 2000);
+      });
+    });
+  }
+});

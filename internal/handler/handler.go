@@ -7,6 +7,7 @@ import (
 	"nginx-builder/internal/builder"
 	"nginx-builder/internal/model"
 	"nginx-builder/internal/nginx"
+	"nginx-builder/internal/system"
 	"os"
 	"strings"
 	"time"
@@ -29,6 +30,11 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 	mux.HandleFunc("/api/builds", h.handleBuilds)
 	mux.HandleFunc("/api/builds/", h.handleBuildByID)
+
+	// System environment and build dependencies endpoints
+	mux.HandleFunc("/api/system/status", h.handleSystemStatus)
+	mux.HandleFunc("/api/system/deps/install", h.handleInstallSystemDeps)
+	mux.HandleFunc("/api/system/deps/logs", h.handleSystemDepsLogs)
 }
 
 func (h *Handler) handleGetVersions(w http.ResponseWriter, r *http.Request) {
@@ -319,4 +325,101 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(data)
+}
+
+func (h *Handler) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	res := system.CheckDependencies()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success": true,
+		"data":    res,
+	})
+}
+
+func (h *Handler) handleInstallSystemDeps(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	err := system.GlobalInstaller.InstallDependencies()
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": "依赖安装任务已成功触发并在后台执行",
+	})
+}
+
+func (h *Handler) handleSystemDepsLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	stream := r.URL.Query().Get("stream") == "true"
+	if !stream {
+		logs := system.GlobalInstaller.GetRecentLogs()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"success": true,
+			"logs":    logs,
+		})
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	// Send existing history logs first
+	recent := system.GlobalInstaller.GetRecentLogs()
+	for _, line := range recent {
+		if line != "" {
+			fmt.Fprintf(w, "data: %s\n\n", line)
+		}
+	}
+	flusher.Flush()
+
+	ch := system.GlobalInstaller.Subscribe()
+	defer system.GlobalInstaller.Unsubscribe(ch)
+
+	notify := r.Context().Done()
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-notify:
+			return
+		case line, ok := <-ch:
+			if !ok {
+				fmt.Fprintf(w, "event: done\ndata: [EOF]\n\n")
+				flusher.Flush()
+				return
+			}
+			if line != "" {
+				fmt.Fprintf(w, "data: %s\n\n", line)
+				flusher.Flush()
+			}
+		case <-ticker.C:
+			fmt.Fprintf(w, ": heartbeat\n\n")
+			flusher.Flush()
+		}
+	}
 }

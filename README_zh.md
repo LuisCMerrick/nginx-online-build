@@ -69,6 +69,9 @@
 | `/api/builds/{id}` | `GET` | 查询任务实时状态、指标、耗时及 `nginx -V` 验证结果 |
 | `/api/builds/{id}/logs` | `GET` | 实时流式获取日志 (`?stream=true`) 或拉取完整文本 |
 | `/api/builds/{id}/artifact` | `GET` | 下载编译打包好的 `tar.gz` 生产部署包 |
+| `/api/system/status` | `GET` | 检查宿主系统 Linux 发行版、包管理器与 Nginx 编译依赖状态 |
+| `/api/system/deps/install` | `POST` | 触发后台自动安装缺失依赖包 |
+| `/api/system/deps/logs` | `GET` | 通过 SSE 实时流式获取依赖安装输出 (`?stream=true`) |
 
 ---
 
