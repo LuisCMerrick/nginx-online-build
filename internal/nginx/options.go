@@ -156,7 +156,7 @@ var OfficialOptions = []model.NginxOption{
 		Category:      model.CategoryHTTP,
 		Type:          "bool",
 		RequiresLib:   "zlib",
-		ConflictsWith: []string{"without_http", "without_http_gzip"},
+		ConflictsWith: []string{"without_http"},
 	},
 	{
 		ID:            "http_auth_request",
@@ -207,7 +207,7 @@ var OfficialOptions = []model.NginxOption{
 		DefaultState:  false,
 		Category:      model.CategoryHTTP,
 		Type:          "bool",
-		ConflictsWith: []string{"without_http", "without_http_cache"},
+		ConflictsWith: []string{"without_http"},
 	},
 	{
 		ID:            "http_stub_status",
@@ -420,11 +420,11 @@ var OfficialOptions = []model.NginxOption{
 		ID:            "without_http_cache",
 		Name:          "--without-http-cache",
 		Flag:          "--without-http-cache",
-		Description:   "完全禁用 HTTP 缓存机制（与依赖缓存的 http_slice 模块互斥）",
+		Description:   "完全禁用 HTTP 缓存机制",
 		DefaultState:  false,
 		Category:      model.CategoryOther,
 		Type:          "bool",
-		ConflictsWith: []string{"without_http", "http_slice"},
+		ConflictsWith: []string{"without_http"},
 	},
 	{
 		ID:            "without_pcre",
@@ -440,11 +440,11 @@ var OfficialOptions = []model.NginxOption{
 		ID:            "without_http_gzip",
 		Name:          "--without-http_gzip_module",
 		Flag:          "--without-http_gzip_module",
-		Description:   "禁用 HTTP Gzip 响应实时压缩模块（与 gzip_static、gunzip 模块互斥）",
+		Description:   "禁用 HTTP Gzip 响应实时压缩模块（不影响直接发送预压缩文件的 gzip_static 模块）",
 		DefaultState:  false,
 		Category:      model.CategoryOther,
 		Type:          "bool",
-		ConflictsWith: []string{"without_http", "http_gzip_static", "http_gunzip"},
+		ConflictsWith: []string{"without_http"},
 	},
 	{
 		ID:            "without_http_rewrite",
@@ -583,11 +583,13 @@ func ValidateAndBuildArgs(
 	resolvedDepDirs map[string]string, // map of "openssl" -> "/path/to/extracted/openssl"
 	autoResolveConflicts bool,
 ) ([]string, []string, []string, error) {
+	userExplicit := make(map[string]bool)
 	selectedMap := make(map[string]bool)
 	for _, id := range selectedIDs {
 		trimmed := strings.TrimSpace(id)
 		if trimmed != "" {
 			selectedMap[trimmed] = true
+			userExplicit[trimmed] = true
 		}
 	}
 
@@ -630,16 +632,30 @@ func ValidateAndBuildArgs(
 	}
 
 	// If without_pcre is chosen, Nginx auto/lib/conf mandates without_http_rewrite_module
-	if selectedMap["without_pcre"] && !selectedMap["without_http_rewrite"] {
+	if selectedMap["without_pcre"] && !selectedMap["without_http"] && !selectedMap["without_http_rewrite"] {
 		selectedMap["without_http_rewrite"] = true
 		warnings = append(warnings, "Nginx 官方规定: 禁用 PCRE 时必须禁用 HTTP Rewrite 模块，已自动添加 --without-http_rewrite_module")
 	}
 
-	// 1. Dependency resolution: auto-satisfy parent dependencies
-	for id := range selectedMap {
-		opt := FindOption(id)
-		if opt == nil {
-			return nil, nil, nil, fmt.Errorf("非法编译参数标识: %s，不在官方白名单中", id)
+	// If without_http is enabled, sub-http disable flags (like without_http_rewrite) are redundant
+	if selectedMap["without_http"] {
+		for _, opt := range OfficialOptions {
+			if opt.ID != "without_http" && strings.HasPrefix(opt.ID, "without_http_") {
+				if selectedMap[opt.ID] {
+					delete(selectedMap, opt.ID)
+					if userExplicit[opt.ID] {
+						warnings = append(warnings, fmt.Sprintf("提示: 由于已指定全系统禁用 HTTP (--without-http)，自动忽略冗余的子模块禁用参数 【%s】", opt.Name))
+					}
+				}
+			}
+		}
+	}
+
+	// 1. Dependency resolution in deterministic slice order
+	for _, opt := range OfficialOptions {
+		id := opt.ID
+		if !selectedMap[id] {
+			continue
 		}
 		for _, dep := range opt.DependsOn {
 			if !selectedMap[dep] {
@@ -654,45 +670,81 @@ func ValidateAndBuildArgs(
 		}
 	}
 
-	// 2. Conflict detection and smart auto-resolution
-	for id := range selectedMap {
-		opt := FindOption(id)
-		if opt == nil {
+	// 2. Conflict detection and deterministic auto-resolution in fixed OfficialOptions order
+	for _, opt := range OfficialOptions {
+		id := opt.ID
+		if !selectedMap[id] {
 			continue
 		}
 		for _, conf := range opt.ConflictsWith {
-			if selectedMap[conf] {
-				pairKey := id + ":" + conf
-				if conf < id {
-					pairKey = conf + ":" + id
-				}
-				if conflictPairsSeen[pairKey] {
-					continue
-				}
-				conflictPairsSeen[pairKey] = true
+			if !selectedMap[conf] {
+				continue
+			}
+			pairKey := id + ":" + conf
+			if conf < id {
+				pairKey = conf + ":" + id
+			}
+			if conflictPairsSeen[pairKey] {
+				continue
+			}
+			conflictPairsSeen[pairKey] = true
 
-				confOpt := FindOption(conf)
-				confName := conf
-				if confOpt != nil {
-					confName = confOpt.Name
-				}
+			confOpt := FindOption(conf)
+			confName := conf
+			if confOpt != nil {
+				confName = confOpt.Name
+			}
 
-				if autoResolveConflicts {
-					// Reconcile: prefer affirmative over negative exclusion
-					if strings.HasPrefix(id, "without_") && !strings.HasPrefix(conf, "without_") {
-						delete(selectedMap, id)
-						warnings = append(warnings, fmt.Sprintf("检测到选项互斥: 【%s】与【%s】，已自动保留功能项【%s】并移除禁用参数", opt.Name, confName, confName))
-					} else if strings.HasPrefix(conf, "without_") && !strings.HasPrefix(id, "without_") {
-						delete(selectedMap, conf)
-						warnings = append(warnings, fmt.Sprintf("检测到选项互斥: 【%s】与【%s】，已自动保留功能项【%s】并移除禁用参数", opt.Name, confName, opt.Name))
-					} else {
-						// Otherwise drop the secondary one
-						delete(selectedMap, conf)
-						warnings = append(warnings, fmt.Sprintf("检测到选项互斥: 【%s】与【%s】，已自动保留【%s】", opt.Name, confName, opt.Name))
-					}
+			if autoResolveConflicts {
+				// Fixed priority rules for conflict resolution:
+				// Priority 1: User explicitly specified intent takes precedence over auto-added dependency
+				idExplicit := userExplicit[id]
+				confExplicit := userExplicit[conf]
+
+				var dropID string
+				var keepID string
+				var reason string
+
+				if idExplicit && !confExplicit {
+					dropID = conf
+					keepID = id
+					reason = fmt.Sprintf("检测到选项互斥: 保留用户明确指定的【%s】，移除自动引入的【%s】", opt.Name, confName)
+				} else if !idExplicit && confExplicit {
+					dropID = id
+					keepID = conf
+					reason = fmt.Sprintf("检测到选项互斥: 保留用户明确指定的【%s】，移除自动引入的【%s】", confName, opt.Name)
 				} else {
-					conflicts = append(conflicts, fmt.Sprintf("参数互斥: 【%s】与【%s】互为排斥选项，同时配置可能导致编译失败", opt.Name, confName))
+					// Both explicit or both auto:
+					// If without_http vs submodule
+					if id == "without_http" && strings.HasPrefix(conf, "without_http_") {
+						dropID = conf
+						keepID = id
+						reason = fmt.Sprintf("检测到选项冗余: 已指定全局【%s】，自动移除子模块禁用参数【%s】", opt.Name, confName)
+					} else if conf == "without_http" && strings.HasPrefix(id, "without_http_") {
+						dropID = id
+						keepID = conf
+						reason = fmt.Sprintf("检测到选项冗余: 已指定全局【%s】，自动移除子模块禁用参数【%s】", confName, opt.Name)
+					} else if strings.HasPrefix(id, "without_") && !strings.HasPrefix(conf, "without_") {
+						dropID = id
+						keepID = conf
+						reason = fmt.Sprintf("检测到选项互斥: 【%s】与【%s】，已自动保留功能项【%s】并移除禁用参数", opt.Name, confName, confName)
+					} else if strings.HasPrefix(conf, "without_") && !strings.HasPrefix(id, "without_") {
+						dropID = conf
+						keepID = id
+						reason = fmt.Sprintf("检测到选项互斥: 【%s】与【%s】，已自动保留功能项【%s】并移除禁用参数", opt.Name, confName, opt.Name)
+					} else {
+						// Deterministic tie-breaker: keep the one earlier in OfficialOptions
+						dropID = conf
+						keepID = id
+						reason = fmt.Sprintf("检测到选项互斥: 【%s】与【%s】，已自动保留【%s】", opt.Name, confName, opt.Name)
+					}
 				}
+
+				delete(selectedMap, dropID)
+				warnings = append(warnings, reason)
+				_ = keepID
+			} else {
+				conflicts = append(conflicts, fmt.Sprintf("参数互斥: 【%s】与【%s】互为排斥选项，同时配置可能导致编译失败", opt.Name, confName))
 			}
 		}
 	}

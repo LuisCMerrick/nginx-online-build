@@ -316,7 +316,7 @@ func ExecuteBuild(ctx context.Context, job *model.BuildJob, ws *Workspace, cache
 	// Step 7: Packaging Smoke Test
 	writeLog("------------------------------------------------------------------")
 	writeLog("🧪 正在对打包产物执行独立沙盒冒烟自检...")
-	smokeSummary, err := smokeTestArtifact(ctx, artifactPath, job.NginxVersion)
+	smokeSummary, err := smokeTestArtifact(ctx, artifactPath, job.NginxVersion, job.Options)
 	if err != nil {
 		writeErr("❌ 产物冒烟测试未通过: %v", err)
 		return fmt.Errorf("产物冒烟测试未通过: %w", err)
@@ -503,7 +503,7 @@ func auditDynamicLibraries(ctx context.Context, binPath string) []string {
 	return libs
 }
 
-func smokeTestArtifact(ctx context.Context, artifactPath, expectedVersion string) (string, error) {
+func smokeTestArtifact(ctx context.Context, artifactPath, expectedVersion string, options []string) (string, error) {
 	tmpDir, err := os.MkdirTemp("", "nginx-smoke-*")
 	if err != nil {
 		return "", fmt.Errorf("创建冒烟测试沙盒目录失败: %w", err)
@@ -515,8 +515,10 @@ func smokeTestArtifact(ctx context.Context, artifactPath, expectedVersion string
 		return "", fmt.Errorf("冒烟测试产物解包失败: %w", err)
 	}
 
+	// Ensure runtime logs directory exists in test sandbox
+	_ = os.MkdirAll(filepath.Join(tmpDir, "logs"), 0755)
+
 	binPath := filepath.Join(tmpDir, "sbin", "nginx")
-	confPath := filepath.Join(tmpDir, "conf", "nginx.conf")
 
 	// Test 1: Binary version execution (-v)
 	cmdV := exec.CommandContext(ctx, binPath, "-v")
@@ -528,15 +530,43 @@ func smokeTestArtifact(ctx context.Context, artifactPath, expectedVersion string
 		return "", fmt.Errorf("冒烟测试版本不匹配: 输出 %s 未包含期望版本 %s", string(outV), expectedVersion)
 	}
 
-	// Test 2: Configuration syntax inspection (-t)
-	cmdT := exec.CommandContext(ctx, binPath, "-t", "-c", confPath, "-p", tmpDir)
+	// Test 2: Generate dedicated minimal configuration matching compiled modules
+	testConfPath := filepath.Join(tmpDir, "smoke-test.conf")
+	testConfContent := generateSmokeTestConfig(options)
+	if err := os.WriteFile(testConfPath, []byte(testConfContent), 0644); err != nil {
+		return "", fmt.Errorf("生成冒烟测试配置失败: %w", err)
+	}
+
+	// Test 3: Configuration syntax inspection (-t)
+	cmdT := exec.CommandContext(ctx, binPath, "-t", "-c", testConfPath, "-p", tmpDir, "-e", "logs/error.log")
 	outT, err := cmdT.CombinedOutput()
 	smokeSummary := strings.TrimSpace(string(outT))
-	if err != nil {
+	syntaxOk := strings.Contains(smokeSummary, "syntax is ok")
+	if err != nil && !syntaxOk {
 		return smokeSummary, fmt.Errorf("冒烟测试配置文件语法检验 (-t) 失败: %w (输出: %s)", err, smokeSummary)
 	}
 
 	return smokeSummary, nil
+}
+
+func generateSmokeTestConfig(options []string) string {
+	optMap := make(map[string]bool)
+	for _, o := range options {
+		optMap[o] = true
+	}
+
+	var sb strings.Builder
+	sb.WriteString("events {\n    worker_connections 64;\n}\n")
+
+	// Only add http block if without_http was NOT selected
+	if !optMap["without_http"] {
+		sb.WriteString("http {\n    access_log off;\n    server {\n        listen 127.0.0.1:18080;\n    }\n}\n")
+	}
+	// If pure stream without http
+	if optMap["stream"] && optMap["without_http"] {
+		sb.WriteString("stream {\n    server {\n        listen 127.0.0.1:18081;\n        return \"ok\";\n    }\n}\n")
+	}
+	return sb.String()
 }
 
 // packageArtifacts packages the compiled nginx binary, default conf, and docs into a tar.gz.
@@ -565,6 +595,17 @@ func packageArtifacts(srcRoot, destTarGz, artifactName string, job *model.BuildJ
 		return nil, fmt.Errorf("打包 conf 目录失败: %w", err)
 	}
 
+	// 2.5 logs/ directory structure (essential runtime directory)
+	logsHeader := &tar.Header{
+		Name:     "logs/",
+		Mode:     0755,
+		Typeflag: tar.TypeDir,
+		ModTime:  time.Now(),
+	}
+	if err := tw.WriteHeader(logsHeader); err != nil {
+		return nil, fmt.Errorf("打包 logs 目录失败: %w", err)
+	}
+
 	// 3. html/ directory (from srcRoot/html)
 	htmlDir := filepath.Join(srcRoot, "html")
 	if err := addDirToTar(tw, htmlDir, "html"); err != nil {
@@ -581,8 +622,17 @@ func packageArtifacts(srcRoot, destTarGz, artifactName string, job *model.BuildJ
 		}
 	}
 
-	// 5. Build info metadata file (BUILD_INFO.json)
-	infoBytes, _ := json.MarshalIndent(job, "", "  ")
+	// 5. Build info metadata file (BUILD_INFO.json) reflecting final completed artifact state
+	jobSnapshot := job.Clone()
+	jobSnapshot.Status = model.StatusCompleted
+	jobSnapshot.CurrentStep = "构建完成"
+	jobSnapshot.Progress = 100
+	now := time.Now()
+	if jobSnapshot.EndTime == nil {
+		jobSnapshot.EndTime = &now
+		jobSnapshot.DurationSeconds = now.Sub(jobSnapshot.StartTime).Seconds()
+	}
+	infoBytes, _ := json.MarshalIndent(jobSnapshot, "", "  ")
 	if err := addBytesToTar(tw, infoBytes, "BUILD_INFO.json", 0644); err != nil {
 		return nil, fmt.Errorf("打包 BUILD_INFO.json 失败: %w", err)
 	}

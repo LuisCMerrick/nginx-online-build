@@ -117,6 +117,14 @@ func TestExtractTarGzRejectsFileCountBomb(t *testing.T) {
 	}
 	defer os.RemoveAll(destDir)
 
-	// Create an archive with > 20000 entries (or test quota)
-	// To keep unit test fast, we can test with a smaller synthetic archive or verify limit logic
+	// Test generateSmokeTestConfig for http vs stream
+	confDefault := generateSmokeTestConfig([]string{"http_ssl", "http_v2"})
+	if !strings.Contains(confDefault, "http {") || strings.Contains(confDefault, "stream {") {
+		t.Fatalf("expected http block, got: %s", confDefault)
+	}
+
+	confStreamOnly := generateSmokeTestConfig([]string{"without_http", "stream"})
+	if strings.Contains(confStreamOnly, "http {") || !strings.Contains(confStreamOnly, "stream {") {
+		t.Fatalf("expected stream block without http, got: %s", confStreamOnly)
+	}
 }

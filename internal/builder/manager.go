@@ -166,8 +166,24 @@ func (m *Manager) runWorker(job *model.BuildJob, ws *Workspace, broadcaster *Log
 		m.mu.Unlock()
 	}()
 
-	// Acquire concurrency slot
-	m.sem <- struct{}{}
+	// Acquire concurrency slot with cancellation awareness
+	select {
+	case <-ctx.Done():
+		m.mu.Lock()
+		now := time.Now()
+		job.Update(func(j *model.BuildJob) {
+			if j.Status != model.StatusCancelled {
+				j.Status = model.StatusFailed
+				j.ErrorMessage = "任务在排队等待调度时被取消或超时"
+				j.EndTime = &now
+				j.DurationSeconds = now.Sub(j.StartTime).Seconds()
+			}
+		})
+		saveMetadata(job, ws.MetadataPath)
+		m.mu.Unlock()
+		return
+	case m.sem <- struct{}{}:
+	}
 	defer func() { <-m.sem }()
 
 	// Print queued warnings if any
@@ -181,10 +197,12 @@ func (m *Manager) runWorker(job *model.BuildJob, ws *Workspace, broadcaster *Log
 	if err != nil {
 		now := time.Now()
 		job.Update(func(j *model.BuildJob) {
-			j.Status = model.StatusFailed
-			j.ErrorMessage = err.Error()
-			j.EndTime = &now
-			j.DurationSeconds = now.Sub(j.StartTime).Seconds()
+			if j.Status != model.StatusCancelled {
+				j.Status = model.StatusFailed
+				j.ErrorMessage = err.Error()
+				j.EndTime = &now
+				j.DurationSeconds = now.Sub(j.StartTime).Seconds()
+			}
 		})
 		saveMetadata(job, ws.MetadataPath)
 	}
@@ -265,31 +283,35 @@ func (m *Manager) UnsubscribeLogs(buildID string, ch chan string) {
 // CancelJob cancels an in-progress or queued build job.
 func (m *Manager) CancelJob(buildID string) error {
 	m.mu.Lock()
-	cancel, ok := m.cancelFuncs[buildID]
+	cancel, hasCancel := m.cancelFuncs[buildID]
 	job, exists := m.jobs[buildID]
+	ws := m.workspaces[buildID]
+	broadcaster := m.broadcasters[buildID]
 	m.mu.Unlock()
 
 	if !exists {
 		return fmt.Errorf("未找到构建任务: %s", buildID)
 	}
 
-	if !ok || job.Status == model.StatusCompleted || job.Status == model.StatusFailed {
-		return fmt.Errorf("任务当前状态不可取消 (当前状态: %s)", job.Status)
-	}
-
-	cancel()
+	var cancelErr error
 	now := time.Now()
 	job.Update(func(j *model.BuildJob) {
-		j.Status = model.StatusFailed
+		if j.Status == model.StatusCompleted || j.Status == model.StatusFailed || j.Status == model.StatusCancelled {
+			cancelErr = fmt.Errorf("任务当前状态不可取消 (当前状态: %s)", j.Status)
+			return
+		}
+		j.Status = model.StatusCancelled
 		j.ErrorMessage = "任务已被用户主动取消"
-		j.EndTime = &now
 		j.DurationSeconds = now.Sub(j.StartTime).Seconds()
 	})
 
-	m.mu.RLock()
-	ws := m.workspaces[buildID]
-	broadcaster := m.broadcasters[buildID]
-	m.mu.RUnlock()
+	if cancelErr != nil {
+		return cancelErr
+	}
+
+	if hasCancel && cancel != nil {
+		cancel()
+	}
 
 	if ws != nil {
 		saveMetadata(job, ws.MetadataPath)

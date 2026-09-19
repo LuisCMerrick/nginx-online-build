@@ -135,8 +135,8 @@ func TestCancelJobAndPruneOldBuilds(t *testing.T) {
 	}
 
 	gotJob, _ := mgr.GetJob(job.BuildID)
-	if gotJob.Status != model.StatusFailed || !strings.Contains(gotJob.ErrorMessage, "取消") {
-		t.Fatalf("expected job status failed with cancel message, got: %s / %s", gotJob.Status, gotJob.ErrorMessage)
+	if gotJob.Status != model.StatusCancelled || !strings.Contains(gotJob.ErrorMessage, "取消") {
+		t.Fatalf("expected job status cancelled with cancel message, got: %s / %s", gotJob.Status, gotJob.ErrorMessage)
 	}
 
 	// Test 3: Prune old builds

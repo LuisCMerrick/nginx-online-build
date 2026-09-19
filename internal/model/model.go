@@ -16,6 +16,7 @@ const (
 	StatusPackaging   BuildStatus = "packaging"   // 打包中
 	StatusCompleted   BuildStatus = "completed"   // 编译完成
 	StatusFailed      BuildStatus = "failed"      // 编译失败
+	StatusCancelled   BuildStatus = "cancelled"   // 任务已取消
 )
 
 // OptionCategory represents parameter functional grouping.

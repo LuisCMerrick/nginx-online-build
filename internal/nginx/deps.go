@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -82,6 +83,19 @@ var DefaultDepLibraries = struct {
 	},
 }
 
+var validDepVersionRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
+
+func validateDepVersion(version string) error {
+	trimmed := strings.TrimSpace(version)
+	if trimmed == "" {
+		return nil
+	}
+	if !validDepVersionRe.MatchString(trimmed) || strings.Contains(trimmed, "..") || strings.Contains(trimmed, "/") || strings.Contains(trimmed, "\\") {
+		return fmt.Errorf("自定义依赖版本号非法: %q (仅允许字母、数字、点、横杠与下划线，严禁路径穿越)", version)
+	}
+	return nil
+}
+
 // ResolveDepSource resolves a library's download URL and expected SHA256.
 func ResolveDepSource(libName, version, customURL string) (*model.DepLibraryInfo, error) {
 	if customURL != "" {
@@ -89,9 +103,13 @@ func ResolveDepSource(libName, version, customURL string) (*model.DepLibraryInfo
 		if !matched {
 			return nil, fmt.Errorf("自定义 %s 源码 URL 必须以 http:// 或 https:// 开头", libName)
 		}
-		ver := version
+		ver := strings.TrimSpace(version)
 		if ver == "" {
 			ver = "custom"
+		} else {
+			if err := validateDepVersion(ver); err != nil {
+				return nil, err
+			}
 		}
 		return &model.DepLibraryInfo{
 			Name:        libName,
@@ -137,6 +155,10 @@ func ResolveDepSource(libName, version, customURL string) (*model.DepLibraryInfo
 // DownloadAndVerifyDep downloads a third-party library tarball and returns the downloaded file path and SHA256.
 // It uses singleflight to deduplicate concurrent downloads and enforces SSRF defenses.
 func DownloadAndVerifyDep(destDir string, info *model.DepLibraryInfo, cacheDir string, logWriter io.Writer) (string, string, error) {
+	if err := validateDepVersion(info.Version); err != nil {
+		return "", "", fmt.Errorf("安全拦截: %w", err)
+	}
+
 	cacheKey := fmt.Sprintf("dep:%s:%s:%s", info.Name, info.Version, info.SourceURL)
 	val, err := downloadGroup.Do(cacheKey, func() (any, error) {
 		return downloadAndVerifyDepInternal(info, cacheDir, logWriter)
@@ -149,8 +171,14 @@ func DownloadAndVerifyDep(destDir string, info *model.DepLibraryInfo, cacheDir s
 	cachePath := res[0]
 	hash := res[1]
 
-	destFileName := fmt.Sprintf("%s-%s.tar.gz", info.Name, info.Version)
-	destPath := filepath.Join(destDir, destFileName)
+	safeVer := filepath.Base(info.Version)
+	destFileName := fmt.Sprintf("%s-%s.tar.gz", info.Name, safeVer)
+	cleanDestDir := filepath.Clean(destDir)
+	destPath := filepath.Clean(filepath.Join(cleanDestDir, destFileName))
+	relDest, err := filepath.Rel(cleanDestDir, destPath)
+	if err != nil || relDest == ".." || strings.HasPrefix(relDest, ".."+string(filepath.Separator)) {
+		return "", "", fmt.Errorf("安全拦截: 依赖包目标路径存在越界逃逸风险")
+	}
 	if err := copyFile(cachePath, destPath); err != nil {
 		return "", "", fmt.Errorf("复制依赖包到工作区失败: %w", err)
 	}
@@ -159,12 +187,22 @@ func DownloadAndVerifyDep(destDir string, info *model.DepLibraryInfo, cacheDir s
 }
 
 func downloadAndVerifyDepInternal(info *model.DepLibraryInfo, cacheDir string, logWriter io.Writer) ([]string, error) {
-	fileName := fmt.Sprintf("%s-%s.tar.gz", info.Name, info.Version)
+	if err := validateDepVersion(info.Version); err != nil {
+		return nil, fmt.Errorf("安全拦截: %w", err)
+	}
+
+	safeVer := filepath.Base(info.Version)
+	fileName := fmt.Sprintf("%s-%s.tar.gz", info.Name, safeVer)
 	if info.Version == "custom" || info.ExpectedSHA == "" {
 		sum := sha256.Sum256([]byte(info.SourceURL))
-		fileName = fmt.Sprintf("%s-%s-%s.tar.gz", info.Name, info.Version, hex.EncodeToString(sum[:])[:8])
+		fileName = fmt.Sprintf("%s-%s-%s.tar.gz", info.Name, safeVer, hex.EncodeToString(sum[:])[:8])
 	}
-	cachePath := filepath.Join(cacheDir, fileName)
+	cleanCacheDir := filepath.Clean(cacheDir)
+	cachePath := filepath.Clean(filepath.Join(cleanCacheDir, fileName))
+	relCache, err := filepath.Rel(cleanCacheDir, cachePath)
+	if err != nil || relCache == ".." || strings.HasPrefix(relCache, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("安全拦截: 依赖包缓存路径存在越界逃逸风险")
+	}
 
 	_ = os.MkdirAll(cacheDir, 0755)
 
