@@ -1,6 +1,6 @@
 # Binaries and build output
 bin/
-server
+/server
 *.exe
 *.test
 *.out
