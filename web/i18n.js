@@ -25,6 +25,14 @@ function getAuthToken() {
     const qKey = params.get("key") || params.get("token") || params.get("auth");
     if (qKey) {
       localStorage.setItem("nginx_builder_key", qKey);
+      if (window.history && window.history.replaceState) {
+        params.delete("key");
+        params.delete("token");
+        params.delete("auth");
+        const newQuery = params.toString() ? ("?" + params.toString()) : "";
+        const cleanUrl = window.location.pathname + newQuery + window.location.hash;
+        window.history.replaceState({}, document.title, cleanUrl);
+      }
       return qKey;
     }
     return localStorage.getItem("nginx_builder_key") || "";

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"nginx-builder/internal/model"
+	"nginx-builder/internal/safenet"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,6 +19,7 @@ var (
 	versionCacheMu sync.RWMutex
 	cachedVersions []model.VersionInfo
 	lastFetchTime  time.Time
+	downloadGroup  safenet.Group
 )
 
 // DefaultKnownVersions provides high-reliability fallbacks with pre-computed official hashes.
@@ -108,7 +110,7 @@ func GetVersion(v string) (*model.VersionInfo, error) {
 
 // fetchOfficialVersions parses https://nginx.org/en/download.html
 func fetchOfficialVersions() []model.VersionInfo {
-	client := &http.Client{Timeout: 8 * time.Second}
+	client := safenet.NewSafeHTTPClient(8 * time.Second)
 	resp, err := client.Get("https://nginx.org/en/download.html")
 	if err != nil || resp.StatusCode != http.StatusOK {
 		return nil
@@ -173,12 +175,32 @@ func fetchOfficialVersions() []model.VersionInfo {
 	return list
 }
 
-// DownloadAndVerifySource downloads the source tarball (with local caching support)
+// DownloadAndVerifySource downloads the source tarball (with local caching and singleflight deduplication)
 // and computes its sha256 hash.
 func DownloadAndVerifySource(targetDir string, versionInfo *model.VersionInfo, cacheDir string, logWriter io.Writer) (string, string, error) {
+	cacheKey := fmt.Sprintf("nginx:%s:%s", versionInfo.Version, versionInfo.SourceURL)
+	val, err := downloadGroup.Do(cacheKey, func() (any, error) {
+		return downloadAndVerifySourceInternal(versionInfo, cacheDir, logWriter)
+	})
+	if err != nil {
+		return "", "", err
+	}
+
+	res := val.([]string)
+	cachePath := res[0]
+	hash := res[1]
+
+	fileName := fmt.Sprintf("nginx-%s.tar.gz", versionInfo.Version)
+	destPath := filepath.Join(targetDir, fileName)
+	if err := copyFile(cachePath, destPath); err != nil {
+		return "", "", fmt.Errorf("复制源码到编译工作目录失败: %w", err)
+	}
+	return destPath, hash, nil
+}
+
+func downloadAndVerifySourceInternal(versionInfo *model.VersionInfo, cacheDir string, logWriter io.Writer) ([]string, error) {
 	fileName := fmt.Sprintf("nginx-%s.tar.gz", versionInfo.Version)
 	cachePath := filepath.Join(cacheDir, fileName)
-	destPath := filepath.Join(targetDir, fileName)
 
 	// Ensure cache directory exists
 	_ = os.MkdirAll(cacheDir, 0755)
@@ -191,12 +213,13 @@ func DownloadAndVerifySource(targetDir string, versionInfo *model.VersionInfo, c
 				if logWriter != nil {
 					fmt.Fprintf(logWriter, "[Source] 从本地缓存命中源码包: %s (SHA256: %s)\n", cachePath, hash)
 				}
-				// Copy to destPath
-				if err := copyFile(cachePath, destPath); err == nil {
-					return destPath, hash, nil
-				}
+				return []string{cachePath, hash}, nil
 			}
 		}
+	}
+
+	if err := safenet.ValidateURLHost(versionInfo.SourceURL); err != nil {
+		return nil, fmt.Errorf("源码下载地址安全校验失败: %w", err)
 	}
 
 	// Download from official URL
@@ -204,22 +227,22 @@ func DownloadAndVerifySource(targetDir string, versionInfo *model.VersionInfo, c
 		fmt.Fprintf(logWriter, "[Source] 正在从官方源下载: %s\n", versionInfo.SourceURL)
 	}
 
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := safenet.NewSafeHTTPClient(60 * time.Second)
 	resp, err := client.Get(versionInfo.SourceURL)
 	if err != nil {
-		return "", "", fmt.Errorf("下载 Nginx 源码失败: %w", err)
+		return nil, fmt.Errorf("下载 Nginx 源码失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("下载 Nginx 源码 HTTP 异常: %s", resp.Status)
+		return nil, fmt.Errorf("下载 Nginx 源码 HTTP 异常: %s", resp.Status)
 	}
 
-	// Write to temporary download file first
-	tmpPath := cachePath + ".tmp"
+	// Write to temporary download file with unique timestamp to prevent race collisions
+	tmpPath := fmt.Sprintf("%s.tmp-%d", cachePath, time.Now().UnixNano())
 	out, err := os.Create(tmpPath)
 	if err != nil {
-		return "", "", fmt.Errorf("创建临时缓存文件失败: %w", err)
+		return nil, fmt.Errorf("创建临时缓存文件失败: %w", err)
 	}
 
 	hasher := sha256.New()
@@ -229,7 +252,7 @@ func DownloadAndVerifySource(targetDir string, versionInfo *model.VersionInfo, c
 	out.Close()
 	if err != nil {
 		os.Remove(tmpPath)
-		return "", "", fmt.Errorf("写入源码包数据流失败: %w", err)
+		return nil, fmt.Errorf("写入源码包数据流失败: %w", err)
 	}
 
 	actualSHA := hex.EncodeToString(hasher.Sum(nil))
@@ -238,21 +261,25 @@ func DownloadAndVerifySource(targetDir string, versionInfo *model.VersionInfo, c
 	}
 
 	// Verify expected sha if provided
-	if versionInfo.ExpectedSHA != "" && actualSHA != versionInfo.ExpectedSHA {
-		os.Remove(tmpPath)
-		return "", "", fmt.Errorf("源码包 SHA256 校验不匹配: 期望 %s, 实际 %s", versionInfo.ExpectedSHA, actualSHA)
+	if versionInfo.ExpectedSHA != "" {
+		if actualSHA != versionInfo.ExpectedSHA {
+			os.Remove(tmpPath)
+			return nil, fmt.Errorf("源码包 SHA256 校验不匹配: 期望 %s, 实际 %s", versionInfo.ExpectedSHA, actualSHA)
+		}
+		if logWriter != nil {
+			fmt.Fprintf(logWriter, "[Source] ✔ 官方已知指纹校验通过 (SHA256: %s)\n", actualSHA)
+		}
+	} else if logWriter != nil {
+		fmt.Fprintf(logWriter, "[Source] ⚠️ 自定义源码已计算校验和: %s (未绑定官方指纹清单)\n", actualSHA)
 	}
 
 	if err := os.Rename(tmpPath, cachePath); err != nil {
-		// If rename fails, fallback to direct dest
+		// If rename fails, fallback to copy
 		_ = copyFile(tmpPath, cachePath)
+		_ = os.Remove(tmpPath)
 	}
 
-	if err := copyFile(cachePath, destPath); err != nil {
-		return "", "", fmt.Errorf("复制源码到编译工作目录失败: %w", err)
-	}
-
-	return destPath, actualSHA, nil
+	return []string{cachePath, actualSHA}, nil
 }
 
 func fileSHA256(path string) (string, error) {

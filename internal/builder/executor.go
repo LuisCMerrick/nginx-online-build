@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -57,9 +58,11 @@ func ExecuteBuild(ctx context.Context, job *model.BuildJob, ws *Workspace, cache
 	writeLog("==================================================================")
 
 	// Step 1: Downloading source
-	job.Status = model.StatusDownloading
-	job.CurrentStep = "下载官方源码包并进行完整性校验"
-	job.Progress = 10
+	job.Update(func(j *model.BuildJob) {
+		j.Status = model.StatusDownloading
+		j.CurrentStep = "下载官方源码包并进行完整性校验"
+		j.Progress = 10
+	})
 	saveMetadata(job, ws.MetadataPath)
 
 	verInfo, err := nginx.GetVersion(job.NginxVersion)
@@ -67,14 +70,18 @@ func ExecuteBuild(ctx context.Context, job *model.BuildJob, ws *Workspace, cache
 		writeErr("获取版本信息失败: %v", err)
 		return err
 	}
-	job.SourceURL = verInfo.SourceURL
+	job.Update(func(j *model.BuildJob) {
+		j.SourceURL = verInfo.SourceURL
+	})
 
 	tarballPath, sha256Hex, err := nginx.DownloadAndVerifySource(ws.SourceDir, verInfo, cacheDir, logWriter)
 	if err != nil {
 		writeErr("下载或校验源码失败: %v", err)
 		return err
 	}
-	job.SourceSHA256 = sha256Hex
+	job.Update(func(j *model.BuildJob) {
+		j.SourceSHA256 = sha256Hex
+	})
 	writeLog("✔ 源码下载与完整性校验通过 (SHA256: %s)", sha256Hex)
 
 	// Step 2: Extracting source
@@ -164,9 +171,11 @@ func ExecuteBuild(ctx context.Context, job *model.BuildJob, ws *Workspace, cache
 	}
 
 	// Step 3: Configuring
-	job.Status = model.StatusConfiguring
-	job.CurrentStep = "生成安全编译配置参数并执行 ./configure"
-	job.Progress = 30
+	job.Update(func(j *model.BuildJob) {
+		j.Status = model.StatusConfiguring
+		j.CurrentStep = "生成安全编译配置参数并执行 ./configure"
+		j.Progress = 30
+	})
 	saveMetadata(job, ws.MetadataPath)
 
 	configureArgs, warns, conflicts, err := nginx.ValidateAndBuildArgs(job.Options, job.PathOverrides, job.ThirdPartySources, resolvedDepDirs, true)
@@ -178,12 +187,15 @@ func ExecuteBuild(ctx context.Context, job *model.BuildJob, ws *Workspace, cache
 	for _, w := range warns {
 		writeLog("⚠️ %s", w)
 	}
-	job.ConfigureArguments = configureArgs
-	job.FullConfigureCmd = fmt.Sprintf("./configure \\\n  %s", strings.Join(configureArgs, " \\\n  "))
+	cmdPreview := fmt.Sprintf("./configure \\\n  %s", strings.Join(configureArgs, " \\\n  "))
+	job.Update(func(j *model.BuildJob) {
+		j.ConfigureArguments = configureArgs
+		j.FullConfigureCmd = cmdPreview
+	})
 
 	writeLog("------------------------------------------------------------------")
 	writeLog("🔧 生成的正式 ./configure 命令:")
-	writeLog("%s", job.FullConfigureCmd)
+	writeLog("%s", cmdPreview)
 	writeLog("------------------------------------------------------------------")
 
 	confLogFile, err := os.OpenFile(ws.ConfigureLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
@@ -198,6 +210,14 @@ func ExecuteBuild(ctx context.Context, job *model.BuildJob, ws *Workspace, cache
 	confCmd.Env = append(os.Environ(), "LANG=C", "LC_ALL=C")
 	confCmd.Stdout = io.MultiWriter(logWriter, confLogFile)
 	confCmd.Stderr = io.MultiWriter(logWriter, confLogFile, errLogFile)
+	confCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	confCmd.Cancel = func() error {
+		if confCmd.Process != nil && confCmd.Process.Pid > 0 {
+			return syscall.Kill(-confCmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	confCmd.WaitDelay = 3 * time.Second
 
 	writeLog("正在运行 ./configure ...")
 	if err := confCmd.Run(); err != nil {
@@ -207,9 +227,11 @@ func ExecuteBuild(ctx context.Context, job *model.BuildJob, ws *Workspace, cache
 	writeLog("✔ ./configure 配置成功完成！")
 
 	// Step 4: Building (make)
-	job.Status = model.StatusBuilding
-	job.CurrentStep = "执行 make 编译二进制产物"
-	job.Progress = 50
+	job.Update(func(j *model.BuildJob) {
+		j.Status = model.StatusBuilding
+		j.CurrentStep = "执行 make 编译二进制产物"
+		j.Progress = 50
+	})
 	saveMetadata(job, ws.MetadataPath)
 
 	numCPU := runtime.NumCPU()
@@ -229,6 +251,14 @@ func ExecuteBuild(ctx context.Context, job *model.BuildJob, ws *Workspace, cache
 	makeCmd.Env = append(os.Environ(), "LANG=C", "LC_ALL=C")
 	makeCmd.Stdout = logWriter
 	makeCmd.Stderr = io.MultiWriter(logWriter, errLogFile)
+	makeCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	makeCmd.Cancel = func() error {
+		if makeCmd.Process != nil && makeCmd.Process.Pid > 0 {
+			return syscall.Kill(-makeCmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	makeCmd.WaitDelay = 3 * time.Second
 
 	if err := makeCmd.Run(); err != nil {
 		writeErr("make 编译失败: %v", err)
@@ -237,14 +267,18 @@ func ExecuteBuild(ctx context.Context, job *model.BuildJob, ws *Workspace, cache
 	writeLog("✔ make 编译成功！")
 
 	// Step 5: Verification (nginx -V)
-	job.Progress = 75
+	job.Update(func(j *model.BuildJob) {
+		j.Progress = 75
+	})
 	nginxBinPath := filepath.Join(srcRoot, "objs", "nginx")
 	writeLog("------------------------------------------------------------------")
 	writeLog("🔍 验证编译产物: %s -V", nginxBinPath)
 	writeLog("------------------------------------------------------------------")
 
 	verifyRes := verifyCompiledNginx(ctx, nginxBinPath, job.NginxVersion, job.ConfigureArguments)
-	job.VerifyResult = verifyRes
+	job.Update(func(j *model.BuildJob) {
+		j.VerifyResult = verifyRes
+	})
 
 	if !verifyRes.Passed {
 		writeErr("❌ 编译结果校验未通过: %s", verifyRes.CheckError)
@@ -254,9 +288,11 @@ func ExecuteBuild(ctx context.Context, job *model.BuildJob, ws *Workspace, cache
 	writeLog("%s", verifyRes.RawOutput)
 
 	// Step 6: Packaging artifacts
-	job.Status = model.StatusPackaging
-	job.CurrentStep = "整理构建产物并打包为 tar.gz"
-	job.Progress = 85
+	job.Update(func(j *model.BuildJob) {
+		j.Status = model.StatusPackaging
+		j.CurrentStep = "整理构建产物并打包为 tar.gz"
+		j.Progress = 85
+	})
 	saveMetadata(job, ws.MetadataPath)
 
 	artifactName := fmt.Sprintf("nginx-%s-%s-%s.tar.gz", job.NginxVersion, job.TargetOS, job.TargetArch)
@@ -268,30 +304,65 @@ func ExecuteBuild(ctx context.Context, job *model.BuildJob, ws *Workspace, cache
 		writeErr("打包构建产物失败: %v", err)
 		return fmt.Errorf("打包失败: %w", err)
 	}
-	job.Artifact = artifactInfo
+	job.Update(func(j *model.BuildJob) {
+		j.Artifact = artifactInfo
+	})
 
 	writeLog("✔ 构建产物打包成功: %s", artifactInfo.Name)
 	writeLog("  大小: %.2f MB (%d bytes)", float64(artifactInfo.Size)/(1024*1024), artifactInfo.Size)
 	writeLog("  SHA256: %s", artifactInfo.SHA256)
 	writeLog("  下载接口: %s", artifactInfo.DownloadURL)
 
+	// Step 7: Packaging Smoke Test
+	writeLog("------------------------------------------------------------------")
+	writeLog("🧪 正在对打包产物执行独立沙盒冒烟自检...")
+	smokeSummary, err := smokeTestArtifact(ctx, artifactPath, job.NginxVersion)
+	if err != nil {
+		writeErr("❌ 产物冒烟测试未通过: %v", err)
+		return fmt.Errorf("产物冒烟测试未通过: %w", err)
+	}
+	writeLog("✔ 产物冒烟测试通过！配置语法检验正常: %s", smokeSummary)
+	job.Update(func(j *model.BuildJob) {
+		if j.VerifyResult != nil {
+			j.VerifyResult.SmokeTest = smokeSummary
+		}
+	})
+
 	// Final Step: Completed
-	job.Status = model.StatusCompleted
-	job.CurrentStep = "编译完成"
-	job.Progress = 100
 	now := time.Now()
-	job.EndTime = &now
-	job.DurationSeconds = now.Sub(job.StartTime).Seconds()
+	var finalDuration float64
+	job.Update(func(j *model.BuildJob) {
+		j.Status = model.StatusCompleted
+		j.CurrentStep = "编译完成"
+		j.Progress = 100
+		j.EndTime = &now
+		j.DurationSeconds = now.Sub(j.StartTime).Seconds()
+		finalDuration = j.DurationSeconds
+	})
 	saveMetadata(job, ws.MetadataPath)
 
 	writeLog("==================================================================")
-	writeLog("🎉 Nginx 编译构建任务已全部圆满成功！耗时: %.2f 秒", job.DurationSeconds)
+	writeLog("🎉 Nginx 编译构建任务已全部圆满成功！耗时: %.2f 秒", finalDuration)
 	writeLog("==================================================================")
+
+	// Clean up bulky intermediate compile trees to save disk space
+	cleanIntermediateFiles(ws)
 
 	return nil
 }
 
-// verifyCompiledNginx executes `objs/nginx -V` and verifies version and args.
+// cleanIntermediateFiles removes heavy temporary compilation directories (work, deps, source)
+// while preserving final artifacts, logs, and metadata.
+func cleanIntermediateFiles(ws *Workspace) {
+	if ws == nil {
+		return
+	}
+	_ = os.RemoveAll(ws.WorkDir)
+	_ = os.RemoveAll(ws.DepsDir)
+	_ = os.RemoveAll(ws.SourceDir)
+}
+
+// verifyCompiledNginx executes `objs/nginx -V` and verifies version, exit code, and configure args.
 func verifyCompiledNginx(ctx context.Context, binPath string, expectedVersion string, expectedArgs []string) *model.VerifyResult {
 	res := &model.VerifyResult{Passed: false}
 
@@ -313,11 +384,8 @@ func verifyCompiledNginx(ctx context.Context, binPath string, expectedVersion st
 	res.RawOutput = rawOutput
 
 	if err != nil {
-		// nginx -V exits with 0, but check output
-		if len(rawOutput) == 0 {
-			res.CheckError = fmt.Sprintf("运行 nginx -V 出错: %v", err)
-			return res
-		}
+		res.CheckError = fmt.Sprintf("运行 nginx -V 出错 (exit code != 0): %v (输出: %s)", err, rawOutput)
+		return res
 	}
 
 	// 3. Validate version string
@@ -329,13 +397,19 @@ func verifyCompiledNginx(ctx context.Context, binPath string, expectedVersion st
 		return res
 	}
 
-	// 4. Validate configure arguments
-	if strings.Contains(rawOutput, "configure arguments:") {
-		res.ArgsMatch = true
-	} else {
-		res.CheckError = "未找到 configure arguments 输出"
+	// 4. Validate configure arguments strictly
+	actualArgs := parseConfigureArguments(rawOutput)
+	missing, unexpected, match := compareConfigureArgs(expectedArgs, actualArgs)
+	res.MissingArgs = missing
+	res.UnexpectedArgs = unexpected
+	res.ArgsMatch = match
+	if !match {
+		res.CheckError = fmt.Sprintf("编译参数核验不通过，缺少期望编译参数: %s", strings.Join(missing, ", "))
 		return res
 	}
+
+	// 5. Dynamic libraries audit (ldd)
+	res.SharedLibs = auditDynamicLibraries(ctx, binPath)
 
 	res.Passed = true
 	lines := strings.Split(rawOutput, "\n")
@@ -343,6 +417,126 @@ func verifyCompiledNginx(ctx context.Context, binPath string, expectedVersion st
 		res.VersionText = lines[0]
 	}
 	return res
+}
+
+func parseConfigureArguments(rawOutput string) []string {
+	const marker = "configure arguments:"
+	idx := strings.Index(rawOutput, marker)
+	if idx == -1 {
+		return nil
+	}
+	argsStr := strings.TrimSpace(rawOutput[idx+len(marker):])
+	var args []string
+	var cur strings.Builder
+	inQuote := false
+	var quoteChar rune
+
+	for _, r := range argsStr {
+		switch {
+		case (r == '\'' || r == '"') && !inQuote:
+			inQuote = true
+			quoteChar = r
+		case inQuote && r == quoteChar:
+			inQuote = false
+		case (r == ' ' || r == '\t' || r == '\n') && !inQuote:
+			if cur.Len() > 0 {
+				args = append(args, cur.String())
+				cur.Reset()
+			}
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	if cur.Len() > 0 {
+		args = append(args, cur.String())
+	}
+	return args
+}
+
+func normalizeArg(arg string) string {
+	a := strings.TrimSpace(arg)
+	a = strings.Trim(a, "'\"")
+	return a
+}
+
+func compareConfigureArgs(expectedArgs, actualArgs []string) (missing []string, unexpected []string, match bool) {
+	actualMap := make(map[string]bool)
+	for _, a := range actualArgs {
+		actualMap[normalizeArg(a)] = true
+	}
+
+	for _, exp := range expectedArgs {
+		norm := normalizeArg(exp)
+		if !actualMap[norm] {
+			missing = append(missing, exp)
+		}
+	}
+
+	expectedMap := make(map[string]bool)
+	for _, exp := range expectedArgs {
+		expectedMap[normalizeArg(exp)] = true
+	}
+
+	for _, act := range actualArgs {
+		norm := normalizeArg(act)
+		if !expectedMap[norm] {
+			unexpected = append(unexpected, act)
+		}
+	}
+
+	return missing, unexpected, len(missing) == 0
+}
+
+func auditDynamicLibraries(ctx context.Context, binPath string) []string {
+	cmd := exec.CommandContext(ctx, "ldd", binPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil
+	}
+	var libs []string
+	for _, line := range strings.Split(string(out), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			libs = append(libs, trimmed)
+		}
+	}
+	return libs
+}
+
+func smokeTestArtifact(ctx context.Context, artifactPath, expectedVersion string) (string, error) {
+	tmpDir, err := os.MkdirTemp("", "nginx-smoke-*")
+	if err != nil {
+		return "", fmt.Errorf("创建冒烟测试沙盒目录失败: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	_, err = extractTarGz(artifactPath, tmpDir)
+	if err != nil {
+		return "", fmt.Errorf("冒烟测试产物解包失败: %w", err)
+	}
+
+	binPath := filepath.Join(tmpDir, "sbin", "nginx")
+	confPath := filepath.Join(tmpDir, "conf", "nginx.conf")
+
+	// Test 1: Binary version execution (-v)
+	cmdV := exec.CommandContext(ctx, binPath, "-v")
+	outV, err := cmdV.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("冒烟测试执行 sbin/nginx -v 失败: %w (输出: %s)", err, strings.TrimSpace(string(outV)))
+	}
+	if !strings.Contains(string(outV), expectedVersion) {
+		return "", fmt.Errorf("冒烟测试版本不匹配: 输出 %s 未包含期望版本 %s", string(outV), expectedVersion)
+	}
+
+	// Test 2: Configuration syntax inspection (-t)
+	cmdT := exec.CommandContext(ctx, binPath, "-t", "-c", confPath, "-p", tmpDir)
+	outT, err := cmdT.CombinedOutput()
+	smokeSummary := strings.TrimSpace(string(outT))
+	if err != nil {
+		return smokeSummary, fmt.Errorf("冒烟测试配置文件语法检验 (-t) 失败: %w (输出: %s)", err, smokeSummary)
+	}
+
+	return smokeSummary, nil
 }
 
 // packageArtifacts packages the compiled nginx binary, default conf, and docs into a tar.gz.
@@ -489,7 +683,14 @@ func addBytesToTar(tw *tar.Writer, content []byte, tarPath string, mode int64) e
 }
 
 // extractTarGz extracts a .tar.gz archive and returns the top-level directory name.
+// It enforces strict ZipSlip / path traversal checks and decompression bomb limits.
 func extractTarGz(tarGzPath, destDir string) (string, error) {
+	const (
+		maxTotalBytes = 1024 * 1024 * 1024 // 1GB maximum decompressed size
+		maxFileBytes  = 512 * 1024 * 1024  // 512MB maximum single file size
+		maxFiles      = 20000              // Maximum number of entries
+	)
+
 	f, err := os.Open(tarGzPath)
 	if err != nil {
 		return "", err
@@ -504,6 +705,9 @@ func extractTarGz(tarGzPath, destDir string) (string, error) {
 
 	tr := tar.NewReader(gr)
 	var candidateTopDir string
+	var totalBytes int64
+	var fileCount int
+	cleanDest := filepath.Clean(destDir)
 
 	for {
 		header, err := tr.Next()
@@ -514,14 +718,22 @@ func extractTarGz(tarGzPath, destDir string) (string, error) {
 			return "", err
 		}
 
+		fileCount++
+		if fileCount > maxFiles {
+			return "", fmt.Errorf("解压文件数量超限 (超过 %d 个条目)，疑似压缩炸弹", maxFiles)
+		}
+
 		// Skip PAX header metadata
 		if header.Typeflag == tar.TypeXHeader || header.Typeflag == tar.TypeXGlobalHeader || header.Name == "pax_global_header" {
 			continue
 		}
 
-		target := filepath.Join(destDir, header.Name)
-		// ZipSlip check
-		if !strings.HasPrefix(filepath.Clean(target), filepath.Clean(destDir)) {
+		target := filepath.Join(cleanDest, header.Name)
+		cleanTarget := filepath.Clean(target)
+
+		// Strict ZipSlip check using filepath.Rel
+		rel, err := filepath.Rel(cleanDest, cleanTarget)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return "", fmt.Errorf("非法压缩包路径逃逸: %s", header.Name)
 		}
 
@@ -532,20 +744,30 @@ func extractTarGz(tarGzPath, destDir string) (string, error) {
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0755); err != nil {
+			if err := os.MkdirAll(cleanTarget, 0755); err != nil {
 				return "", err
 			}
 		case tar.TypeReg:
-			_ = os.MkdirAll(filepath.Dir(target), 0755)
-			outFile, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR|os.O_TRUNC, header.FileInfo().Mode())
+			_ = os.MkdirAll(filepath.Dir(cleanTarget), 0755)
+			outFile, err := os.OpenFile(cleanTarget, os.O_CREATE|os.O_RDWR|os.O_TRUNC, header.FileInfo().Mode())
 			if err != nil {
 				return "", err
 			}
-			if _, err := io.Copy(outFile, tr); err != nil {
-				outFile.Close()
+
+			// Guard against single file bomb
+			lr := io.LimitReader(tr, maxFileBytes+1)
+			written, err := io.Copy(outFile, lr)
+			outFile.Close()
+			if err != nil {
 				return "", err
 			}
-			outFile.Close()
+			if written > maxFileBytes {
+				return "", fmt.Errorf("单文件解压体积超限 (超过 512MB): %s", header.Name)
+			}
+			totalBytes += written
+			if totalBytes > maxTotalBytes {
+				return "", fmt.Errorf("总解压体积超限 (超过 1GB)，已终止解压")
+			}
 		}
 	}
 
@@ -570,7 +792,10 @@ func extractTarGz(tarGzPath, destDir string) (string, error) {
 }
 
 func saveMetadata(job *model.BuildJob, metaPath string) {
-	data, err := json.MarshalIndent(job, "", "  ")
+	if job == nil {
+		return
+	}
+	data, err := json.MarshalIndent(job.Clone(), "", "  ")
 	if err == nil {
 		_ = os.WriteFile(metaPath, data, 0644)
 	}

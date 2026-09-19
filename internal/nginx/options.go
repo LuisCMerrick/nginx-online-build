@@ -26,9 +26,8 @@ var OfficialOptions = []model.NginxOption{
 		Flag:          "--with-http_v2_module",
 		Description:   "启用 HTTP/2 协议支持",
 		DefaultState:  false,
-		Category:      model.CategorySSL,
+		Category:      model.CategoryHTTP,
 		Type:          "bool",
-		DependsOn:     []string{"http_ssl"},
 		ConflictsWith: []string{"without_http"},
 	},
 	{
@@ -615,13 +614,7 @@ func ValidateAndBuildArgs(
 		}
 		// OpenSSL 1.1.1w does NOT support HTTP/3 (QUIC)
 		if thirdParty.OpenSSLVersion == "1.1.1w" && selectedMap["http_v3"] {
-			msg := "版本互斥提示: OpenSSL 1.1.1w 不提供 QUIC 协议 API 支持，无法与 --with-http_v3_module (HTTP/3) 配合编译"
-			if autoResolveConflicts {
-				thirdParty.OpenSSLVersion = "3.4.1"
-				warnings = append(warnings, msg+"（已自动将 OpenSSL 源码版本升级为支持 QUIC 的 3.4.1 稳定版）")
-			} else {
-				conflicts = append(conflicts, msg+"，建议升级至 OpenSSL 3.4.1 或取消 HTTP/3")
-			}
+			warnings = append(warnings, "建议提示: Nginx HTTP/3 (QUIC) 推荐配合 OpenSSL 3.x 或支持 QUIC 的衍生分支（如 quictls/BoringSSL）以支持完整特性；当前选择的 OpenSSL 1.1.1w 仅支持基础编译，若缺少 QUIC 补丁可能会在编译阶段报错")
 		}
 	}
 

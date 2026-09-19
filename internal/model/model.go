@@ -1,6 +1,7 @@
 package model
 
 import (
+	"sync"
 	"time"
 )
 
@@ -98,12 +99,16 @@ type ArtifactInfo struct {
 
 // VerifyResult stores `nginx -V` verification details after compilation.
 type VerifyResult struct {
-	Passed       bool   `json:"passed"`
-	VersionMatch bool   `json:"version_match"`
-	ArgsMatch    bool   `json:"args_match"`
-	VersionText  string `json:"version_text"`
-	RawOutput    string `json:"raw_output"`
-	CheckError   string `json:"check_error,omitempty"`
+	Passed         bool     `json:"passed"`
+	VersionMatch   bool     `json:"version_match"`
+	ArgsMatch      bool     `json:"args_match"`
+	VersionText    string   `json:"version_text"`
+	RawOutput      string   `json:"raw_output"`
+	CheckError     string   `json:"check_error,omitempty"`
+	MissingArgs    []string `json:"missing_args,omitempty"`
+	UnexpectedArgs []string `json:"unexpected_args,omitempty"`
+	SharedLibs     []string `json:"shared_libs,omitempty"`
+	SmokeTest      string   `json:"smoke_test,omitempty"`
 }
 
 // HostInfo records environment information where the build ran.
@@ -119,6 +124,7 @@ type HostInfo struct {
 
 // BuildJob represents a complete Nginx build task with state and audit data.
 type BuildJob struct {
+	mu                  sync.RWMutex           `json:"-"`
 	BuildID             string                 `json:"build_id"`
 	NginxVersion        string                 `json:"nginx_version"`
 	TargetOS            string                 `json:"target_os"`
@@ -142,6 +148,91 @@ type BuildJob struct {
 	VerifyResult        *VerifyResult          `json:"verify_result,omitempty"`
 	ErrorMessage        string                 `json:"error_message,omitempty"`
 	LogFilePath         string                 `json:"log_file_path,omitempty"`
+}
+
+// Clone returns a deep copy of BuildJob to prevent data races when reading state concurrently.
+func (j *BuildJob) Clone() *BuildJob {
+	if j == nil {
+		return nil
+	}
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+
+	clone := &BuildJob{
+		BuildID:            j.BuildID,
+		NginxVersion:       j.NginxVersion,
+		TargetOS:           j.TargetOS,
+		TargetArch:         j.TargetArch,
+		FullConfigureCmd:   j.FullConfigureCmd,
+		Status:             j.Status,
+		CurrentStep:        j.CurrentStep,
+		Progress:           j.Progress,
+		StartTime:          j.StartTime,
+		DurationSeconds:    j.DurationSeconds,
+		CompilerVersion:    j.CompilerVersion,
+		SourceURL:          j.SourceURL,
+		SourceSHA256:       j.SourceSHA256,
+		ErrorMessage:       j.ErrorMessage,
+		LogFilePath:        j.LogFilePath,
+	}
+
+	if len(j.Options) > 0 {
+		clone.Options = make([]string, len(j.Options))
+		copy(clone.Options, j.Options)
+	}
+	if j.PathOverrides != nil {
+		clone.PathOverrides = make(map[string]string, len(j.PathOverrides))
+		for k, v := range j.PathOverrides {
+			clone.PathOverrides[k] = v
+		}
+	}
+	if j.ThirdPartySources != nil {
+		tp := *j.ThirdPartySources
+		clone.ThirdPartySources = &tp
+	}
+	if len(j.ConfigureArguments) > 0 {
+		clone.ConfigureArguments = make([]string, len(j.ConfigureArguments))
+		copy(clone.ConfigureArguments, j.ConfigureArguments)
+	}
+	if j.EndTime != nil {
+		t := *j.EndTime
+		clone.EndTime = &t
+	}
+	if j.Artifact != nil {
+		art := *j.Artifact
+		clone.Artifact = &art
+	}
+	if j.HostInfo != nil {
+		host := *j.HostInfo
+		clone.HostInfo = &host
+	}
+	if j.VerifyResult != nil {
+		v := *j.VerifyResult
+		if len(j.VerifyResult.MissingArgs) > 0 {
+			v.MissingArgs = make([]string, len(j.VerifyResult.MissingArgs))
+			copy(v.MissingArgs, j.VerifyResult.MissingArgs)
+		}
+		if len(j.VerifyResult.UnexpectedArgs) > 0 {
+			v.UnexpectedArgs = make([]string, len(j.VerifyResult.UnexpectedArgs))
+			copy(v.UnexpectedArgs, j.VerifyResult.UnexpectedArgs)
+		}
+		if len(j.VerifyResult.SharedLibs) > 0 {
+			v.SharedLibs = make([]string, len(j.VerifyResult.SharedLibs))
+			copy(v.SharedLibs, j.VerifyResult.SharedLibs)
+		}
+		clone.VerifyResult = &v
+	}
+	return clone
+}
+
+// Update executes a thread-safe mutation of the job state.
+func (j *BuildJob) Update(fn func(job *BuildJob)) {
+	if j == nil {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	fn(j)
 }
 
 // CreateBuildRequest is the payload received when creating a new build task.

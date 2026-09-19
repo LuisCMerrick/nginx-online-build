@@ -193,6 +193,8 @@ func (h *Handler) handleBuildByID(w http.ResponseWriter, r *http.Request) {
 		h.handleGetLogs(w, r, buildID)
 	case "artifact":
 		h.handleGetArtifact(w, r, buildID)
+	case "cancel":
+		h.handleCancelBuild(w, r, buildID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -213,6 +215,27 @@ func parseBuildRequestPath(path string) (buildID, action string, ok bool) {
 		action = parts[1]
 	}
 	return parts[0], action, true
+}
+
+func (h *Handler) handleCancelBuild(w http.ResponseWriter, r *http.Request, buildID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	err := h.mgr.CancelJob(buildID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": "构建任务已成功取消",
+	})
 }
 
 func (h *Handler) handleGetBuild(w http.ResponseWriter, r *http.Request, buildID string) {

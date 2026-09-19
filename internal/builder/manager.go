@@ -82,12 +82,13 @@ func (m *Manager) CreateJob(req *model.CreateBuildRequest) (*model.BuildJob, err
 	}
 
 	// 2. Validate and build configure arguments
-	// Always auto-resolve conflicts safely upon build execution, ensuring compilation never crashes due to mutual exclusions.
-	args, warns, conflicts, err := nginx.ValidateAndBuildArgs(req.Options, req.PathOverrides, req.ThirdPartySources, nil, true)
+	args, warns, conflicts, err := nginx.ValidateAndBuildArgs(req.Options, req.PathOverrides, req.ThirdPartySources, nil, req.AutoResolveConflicts)
 	if err != nil {
 		return nil, fmt.Errorf("参数校验未通过: %w", err)
 	}
-	_ = conflicts // auto-resolved into warnings
+	if len(conflicts) > 0 && !req.AutoResolveConflicts {
+		return nil, fmt.Errorf("存在编译参数冲突: %s，请调整选项或启用自动冲突解决", strings.Join(conflicts, "; "))
+	}
 
 	targetOS := req.TargetOS
 	if targetOS == "" {
@@ -178,11 +179,13 @@ func (m *Manager) runWorker(job *model.BuildJob, ws *Workspace, broadcaster *Log
 
 	m.mu.Lock()
 	if err != nil {
-		job.Status = model.StatusFailed
-		job.ErrorMessage = err.Error()
 		now := time.Now()
-		job.EndTime = &now
-		job.DurationSeconds = now.Sub(job.StartTime).Seconds()
+		job.Update(func(j *model.BuildJob) {
+			j.Status = model.StatusFailed
+			j.ErrorMessage = err.Error()
+			j.EndTime = &now
+			j.DurationSeconds = now.Sub(j.StartTime).Seconds()
+		})
 		saveMetadata(job, ws.MetadataPath)
 	}
 	m.mu.Unlock()
@@ -193,7 +196,10 @@ func (m *Manager) GetJob(buildID string) (*model.BuildJob, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	job, exists := m.jobs[buildID]
-	return job, exists
+	if !exists {
+		return nil, false
+	}
+	return job.Clone(), true
 }
 
 // ListJobs returns all jobs sorted descending by start time.
@@ -203,7 +209,7 @@ func (m *Manager) ListJobs(limit int) []*model.BuildJob {
 
 	list := make([]*model.BuildJob, 0, len(m.jobs))
 	for _, j := range m.jobs {
-		list = append(list, j)
+		list = append(list, j.Clone())
 	}
 
 	sort.Slice(list, func(i, j int) bool {
@@ -254,6 +260,88 @@ func (m *Manager) UnsubscribeLogs(buildID string, ch chan string) {
 	if ok {
 		broadcaster.Unsubscribe(ch)
 	}
+}
+
+// CancelJob cancels an in-progress or queued build job.
+func (m *Manager) CancelJob(buildID string) error {
+	m.mu.Lock()
+	cancel, ok := m.cancelFuncs[buildID]
+	job, exists := m.jobs[buildID]
+	m.mu.Unlock()
+
+	if !exists {
+		return fmt.Errorf("未找到构建任务: %s", buildID)
+	}
+
+	if !ok || job.Status == model.StatusCompleted || job.Status == model.StatusFailed {
+		return fmt.Errorf("任务当前状态不可取消 (当前状态: %s)", job.Status)
+	}
+
+	cancel()
+	now := time.Now()
+	job.Update(func(j *model.BuildJob) {
+		j.Status = model.StatusFailed
+		j.ErrorMessage = "任务已被用户主动取消"
+		j.EndTime = &now
+		j.DurationSeconds = now.Sub(j.StartTime).Seconds()
+	})
+
+	m.mu.RLock()
+	ws := m.workspaces[buildID]
+	broadcaster := m.broadcasters[buildID]
+	m.mu.RUnlock()
+
+	if ws != nil {
+		saveMetadata(job, ws.MetadataPath)
+	}
+	if broadcaster != nil {
+		_ = broadcaster.Close()
+	}
+
+	return nil
+}
+
+// PruneOldBuilds cleans up build workspaces when the total count exceeds maxKeep.
+func (m *Manager) PruneOldBuilds(maxKeep int) (int, error) {
+	if maxKeep <= 0 {
+		return 0, nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.jobs) <= maxKeep {
+		return 0, nil
+	}
+
+	list := make([]*model.BuildJob, 0, len(m.jobs))
+	for _, j := range m.jobs {
+		list = append(list, j)
+	}
+
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].StartTime.After(list[j].StartTime)
+	})
+
+	pruneCount := 0
+	for idx := maxKeep; idx < len(list); idx++ {
+		toDelete := list[idx]
+		// Do not delete currently active jobs
+		if toDelete.Status == model.StatusQueued || toDelete.Status == model.StatusDownloading ||
+			toDelete.Status == model.StatusConfiguring || toDelete.Status == model.StatusBuilding ||
+			toDelete.Status == model.StatusPackaging {
+			continue
+		}
+
+		delete(m.jobs, toDelete.BuildID)
+		delete(m.broadcasters, toDelete.BuildID)
+		delete(m.workspaces, toDelete.BuildID)
+		dir := filepath.Join(m.cfg.BuildDir, toDelete.BuildID)
+		_ = os.RemoveAll(dir)
+		pruneCount++
+	}
+
+	return pruneCount, nil
 }
 
 // GetArtifactPath returns the absolute path to the generated tar.gz artifact.
