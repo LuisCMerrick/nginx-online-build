@@ -38,7 +38,8 @@ function apiUrl(path) {
   if (path.startsWith("http://") || path.startsWith("https://")) return path;
   const base = getAppBasePath();
   const clean = path.startsWith("/") ? path : "/" + path;
-  let full = base ? (base + clean) : clean;
+  const alreadyPrefixed = base && (clean === base || clean.startsWith(base + "/"));
+  let full = base && !alreadyPrefixed ? (base + clean) : clean;
 
   // If token is present, append to API and locales URLs as secondary fallback
   const token = getAuthToken();

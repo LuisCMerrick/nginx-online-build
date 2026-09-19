@@ -174,7 +174,7 @@ func (m *Manager) runWorker(job *model.BuildJob, ws *Workspace, broadcaster *Log
 		_, _ = broadcaster.Write([]byte(fmt.Sprintf("[%s] [WARN] %s\n", time.Now().Format("15:04:05"), w)))
 	}
 
-	err := ExecuteBuild(ctx, job, ws, m.cfg.CacheDir, m.cfg.BasePath, broadcaster)
+	err := ExecuteBuild(ctx, job, ws, m.cfg.CacheDir, broadcaster)
 
 	m.mu.Lock()
 	if err != nil {

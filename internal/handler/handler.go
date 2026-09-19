@@ -71,12 +71,12 @@ func (h *Handler) handleGetOptions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"success":        true,
-		"options":        nginx.OfficialOptions,
-		"categories":     categories,
-		"presets":        nginx.ParameterPresets,
-		"path_defaults":  nginx.AllowedPathOptions,
-		"dep_libraries":  nginx.DefaultDepLibraries,
+		"success":       true,
+		"options":       nginx.OfficialOptions,
+		"categories":    categories,
+		"presets":       nginx.ParameterPresets,
+		"path_defaults": nginx.AllowedPathOptions,
+		"dep_libraries": nginx.DefaultDepLibraries,
 	})
 }
 
@@ -180,18 +180,10 @@ func (h *Handler) handleBuilds(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleBuildByID(w http.ResponseWriter, r *http.Request) {
 	// Path pattern: /api/builds/{build_id} or /api/builds/{build_id}/logs or /api/builds/{build_id}/artifact
-	subPath := strings.TrimPrefix(r.URL.Path, "/api/builds/")
-	parts := strings.Split(strings.Trim(subPath, "/"), "/")
-
-	if len(parts) == 0 || parts[0] == "" {
+	buildID, action, ok := parseBuildRequestPath(r.URL.Path)
+	if !ok {
 		http.NotFound(w, r)
 		return
-	}
-
-	buildID := parts[0]
-	action := ""
-	if len(parts) > 1 {
-		action = parts[1]
 	}
 
 	switch action {
@@ -204,6 +196,23 @@ func (h *Handler) handleBuildByID(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func parseBuildRequestPath(path string) (buildID, action string, ok bool) {
+	const buildsPrefix = "/api/builds/"
+	index := strings.Index(path, buildsPrefix)
+	if index == -1 {
+		return "", "", false
+	}
+
+	parts := strings.Split(strings.Trim(path[index+len(buildsPrefix):], "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		return "", "", false
+	}
+	if len(parts) > 1 {
+		action = parts[1]
+	}
+	return parts[0], action, true
 }
 
 func (h *Handler) handleGetBuild(w http.ResponseWriter, r *http.Request, buildID string) {
