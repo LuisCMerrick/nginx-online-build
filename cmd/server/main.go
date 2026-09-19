@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"nginx-builder/internal/auth"
 	"nginx-builder/internal/builder"
 	"nginx-builder/internal/config"
 	"nginx-builder/internal/handler"
@@ -28,6 +30,16 @@ func main() {
 		log.Printf("URL base path prefix:  %s", cfg.BasePath)
 	}
 	log.Printf("Target bind address:   http://%s%s", addr, cfg.BasePath)
+
+	if cfg.AuthEnabled {
+		accessURL := fmt.Sprintf("http://%s%s/?key=%s", addr, cfg.BasePath, cfg.AuthKey)
+		log.Printf("--------------------------------------------------")
+		log.Printf("🔐 URL Authentication: ENABLED (default on)")
+		log.Printf("🔑 Access Auth Key:    %s", cfg.AuthKey)
+		log.Printf("🔗 Direct Access URL:  %s", accessURL)
+	} else {
+		log.Printf("🔓 URL Authentication: DISABLED (--no-auth)")
+	}
 	log.Printf("--------------------------------------------------")
 
 	mgr := builder.NewManager(cfg)
@@ -77,7 +89,11 @@ func main() {
 	})
 
 	log.Printf("✔ Web server is ready and listening on http://%s%s", addr, cfg.BasePath)
-	if err := http.ListenAndServe(addr, mux); err != nil && err != http.ErrServerClosed {
+
+	// Wrap root router with URL Access Authentication Middleware
+	serverHandler := auth.Middleware(cfg, mux)
+
+	if err := http.ListenAndServe(addr, serverHandler); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server terminated with error: %v", err)
 		os.Exit(1)
 	}

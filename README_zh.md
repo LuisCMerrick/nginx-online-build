@@ -87,6 +87,9 @@ Options:
   -h, --host <ip>        Server listen host/address (default: "0.0.0.0", env: HOST)
   -p, --port <port>      Server listen port (default: "8090", env: PORT)
   -b, --base-path <path> URL base path prefix for reverse proxy (default: "", env: BASE_PATH)
+  -a, --auth             Enable URL access authentication (default: true, disable with --no-auth, env: AUTH_ENABLED)
+      --no-auth          Explicitly disable access authentication
+  -k, --auth-key <key>   Custom secret key for URL access authentication (default: auto-generated, env: AUTH_KEY)
   -d, --data-dir <path>  Working data directory for builds and cache (default: "./data", env: DATA_DIR)
   -j, --jobs <n>         Max concurrent compilation jobs (default: 2, env: MAX_CONCURRENT_JOBS)
   -t, --timeout <min>    Job execution timeout in minutes (default: 20, env: JOB_TIMEOUT_MINUTES)
@@ -97,6 +100,18 @@ Options:
 ### 常用启动示例
 
 ```bash
+# 默认启动：自动开启 URL 访问鉴权，并在控制台打印鉴权密钥和直接访问链接
+# 🔐 URL Authentication: ENABLED (default on)
+# 🔑 Access Auth Key:    a8f3b9c2e1d45678f0123456789abcde
+# 🔗 Direct Access URL:  http://0.0.0.0:8090/?key=a8f3b9c2e1d45678f0123456789abcde
+./bin/nginx-builder
+
+# 显式关闭鉴权 (任何人均可匿名访问)
+./bin/nginx-builder --no-auth
+
+# 自定义访问鉴权密钥
+./bin/nginx-builder -auth-key my_secure_password_123
+
 # 指定仅监听本地回环地址与 9000 端口
 ./bin/nginx-builder -host 127.0.0.1 -port 9000
 

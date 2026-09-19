@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
@@ -23,6 +25,8 @@ type Config struct {
 	CacheDir          string
 	MaxConcurrentJobs int
 	JobTimeout        time.Duration
+	AuthEnabled       bool
+	AuthKey           string
 }
 
 // ParseCLI parses command-line flags, environment variables, and fallback defaults.
@@ -41,6 +45,9 @@ func ParseCLI(args []string) *Config {
 		fmt.Fprintf(os.Stderr, "  -h, --host <ip>        Server listen host/address (default: \"0.0.0.0\", env: HOST)\n")
 		fmt.Fprintf(os.Stderr, "  -p, --port <port>      Server listen port (default: \"8090\", env: PORT)\n")
 		fmt.Fprintf(os.Stderr, "  -b, --base-path <path> URL base path prefix for reverse proxy (default: \"\", env: BASE_PATH)\n")
+		fmt.Fprintf(os.Stderr, "  -a, --auth             Enable URL access authentication (default: true, disable with --no-auth, env: AUTH_ENABLED)\n")
+		fmt.Fprintf(os.Stderr, "      --no-auth          Explicitly disable access authentication\n")
+		fmt.Fprintf(os.Stderr, "  -k, --auth-key <key>   Custom secret key for URL access authentication (default: auto-generated, env: AUTH_KEY)\n")
 		fmt.Fprintf(os.Stderr, "  -d, --data-dir <path>  Working data directory for builds and cache (default: \"./data\", env: DATA_DIR)\n")
 		fmt.Fprintf(os.Stderr, "  -j, --jobs <n>         Max concurrent compilation jobs (default: 2, env: MAX_CONCURRENT_JOBS)\n")
 		fmt.Fprintf(os.Stderr, "  -t, --timeout <min>    Job execution timeout in minutes (default: 20, env: JOB_TIMEOUT_MINUTES)\n")
@@ -60,6 +67,20 @@ func ParseCLI(args []string) *Config {
 	}
 
 	envBasePath := CleanBasePath(os.Getenv("BASE_PATH"))
+
+	envAuth := true
+	if val := os.Getenv("AUTH_ENABLED"); val != "" {
+		val = strings.ToLower(strings.TrimSpace(val))
+		if val == "false" || val == "0" || val == "no" || val == "off" {
+			envAuth = false
+		}
+	} else if val := os.Getenv("AUTH"); val != "" {
+		val = strings.ToLower(strings.TrimSpace(val))
+		if val == "false" || val == "0" || val == "no" || val == "off" {
+			envAuth = false
+		}
+	}
+	envAuthKey := strings.TrimSpace(os.Getenv("AUTH_KEY"))
 
 	envDataDir := os.Getenv("DATA_DIR")
 	if envDataDir == "" {
@@ -84,6 +105,9 @@ func ParseCLI(args []string) *Config {
 		hostFlag       string
 		portFlag       string
 		basePathFlag   string
+		authFlag       bool
+		noAuthFlag     bool
+		authKeyFlag    string
 		dataDirFlag    string
 		jobsFlag       int
 		timeoutFlag    int
@@ -99,6 +123,13 @@ func ParseCLI(args []string) *Config {
 
 	fs.StringVar(&basePathFlag, "base-path", envBasePath, "Base URL subpath prefix")
 	fs.StringVar(&basePathFlag, "b", envBasePath, "Base URL subpath prefix (short)")
+
+	fs.BoolVar(&authFlag, "auth", envAuth, "Enable URL access authentication (default: true)")
+	fs.BoolVar(&authFlag, "a", envAuth, "Enable URL access authentication (short)")
+	fs.BoolVar(&noAuthFlag, "no-auth", false, "Explicitly disable URL access authentication")
+
+	fs.StringVar(&authKeyFlag, "auth-key", envAuthKey, "Custom access authentication key")
+	fs.StringVar(&authKeyFlag, "k", envAuthKey, "Custom access authentication key (short)")
 
 	fs.StringVar(&dataDirFlag, "data-dir", envDataDir, "Data directory")
 	fs.StringVar(&dataDirFlag, "d", envDataDir, "Data directory (short)")
@@ -139,6 +170,17 @@ func ParseCLI(args []string) *Config {
 		timeoutFlag = 20
 	}
 
+	authEnabled := authFlag
+	if noAuthFlag {
+		authEnabled = false
+	}
+
+	authKey := strings.TrimSpace(authKeyFlag)
+	if authEnabled && authKey == "" {
+		// Import will be handled or fallback token
+		authKey = GenerateDefaultAuthKey()
+	}
+
 	buildDir := filepath.Join(dataDirFlag, "builds")
 	cacheDir := filepath.Join(dataDirFlag, "cache")
 
@@ -158,7 +200,18 @@ func ParseCLI(args []string) *Config {
 		CacheDir:          cacheDir,
 		MaxConcurrentJobs: jobsFlag,
 		JobTimeout:        time.Duration(timeoutFlag) * time.Minute,
+		AuthEnabled:       authEnabled,
+		AuthKey:           authKey,
 	}
+}
+
+// GenerateDefaultAuthKey creates a secure random 32-character hex key if none provided.
+func GenerateDefaultAuthKey() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err == nil {
+		return hex.EncodeToString(b)
+	}
+	return fmt.Sprintf("nb_%d_%d", time.Now().UnixNano(), os.Getpid())
 }
 
 // CleanBasePath normalizes URL subpath prefixes (e.g. "/nginx" or "" for root).

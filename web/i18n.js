@@ -18,17 +18,41 @@ function getAppBasePath() {
   return p;
 }
 
+function getAuthToken() {
+  if (typeof window === "undefined") return "";
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const qKey = params.get("key") || params.get("token") || params.get("auth");
+    if (qKey) {
+      localStorage.setItem("nginx_builder_key", qKey);
+      return qKey;
+    }
+    return localStorage.getItem("nginx_builder_key") || "";
+  } catch (e) {
+    return "";
+  }
+}
+
 function apiUrl(path) {
   if (!path) return path;
   if (path.startsWith("http://") || path.startsWith("https://")) return path;
   const base = getAppBasePath();
-  if (!base) return path;
-  if (path === base || path.startsWith(base + "/")) return path;
   const clean = path.startsWith("/") ? path : "/" + path;
-  return base + clean;
+  let full = base ? (base + clean) : clean;
+
+  // If token is present, append to API and locales URLs as secondary fallback
+  const token = getAuthToken();
+  if (token && (full.includes("/api/") || full.includes("/locales/"))) {
+    const sep = full.includes("?") ? "&" : "?";
+    if (!full.includes("key=") && !full.includes("token=") && !full.includes("auth=")) {
+      full += sep + "key=" + encodeURIComponent(token);
+    }
+  }
+  return full;
 }
 
 window.getAppBasePath = getAppBasePath;
+window.getAuthToken = getAuthToken;
 window.apiUrl = apiUrl;
 
 const I18N_ENGINE = {

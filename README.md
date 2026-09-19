@@ -115,6 +115,9 @@ Options:
   -h, --host <ip>        Server listen host/address (default: "0.0.0.0", env: HOST)
   -p, --port <port>      Server listen port (default: "8090", env: PORT)
   -b, --base-path <path> URL base path prefix for reverse proxy (default: "", env: BASE_PATH)
+  -a, --auth             Enable URL access authentication (default: true, disable with --no-auth, env: AUTH_ENABLED)
+      --no-auth          Explicitly disable access authentication
+  -k, --auth-key <key>   Custom secret key for URL access authentication (default: auto-generated, env: AUTH_KEY)
   -d, --data-dir <path>  Working data directory for builds and cache (default: "./data", env: DATA_DIR)
   -j, --jobs <n>         Max concurrent compilation jobs (default: 2, env: MAX_CONCURRENT_JOBS)
   -t, --timeout <min>    Job execution timeout in minutes (default: 20, env: JOB_TIMEOUT_MINUTES)
@@ -125,6 +128,18 @@ Options:
 ### Examples
 
 ```bash
+# Default: URL authentication is ENABLED. A direct access URL is printed on startup:
+# 🔐 URL Authentication: ENABLED (default on)
+# 🔑 Access Auth Key:    a8f3b9c2e1d45678f0123456789abcde
+# 🔗 Direct Access URL:  http://0.0.0.0:8090/?key=a8f3b9c2e1d45678f0123456789abcde
+./bin/nginx-builder
+
+# Explicitly disable authentication (--no-auth or -auth=false)
+./bin/nginx-builder --no-auth
+
+# Specify custom authentication key
+./bin/nginx-builder -auth-key my_secure_password_123
+
 # Listen on localhost port 9000 with custom data path
 ./bin/nginx-builder -host 127.0.0.1 -port 9000 -data-dir /var/lib/nginx-builder
 
