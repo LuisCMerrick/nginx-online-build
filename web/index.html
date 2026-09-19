@@ -411,7 +411,7 @@
           <strong>Smart Recommendation:</strong> Click "Auto-Resolve & Build" below. The system will retain primary functional modules, safely remove contradictory exclusion flags, satisfy missing dependencies, and start the build immediately.
         </div>
       </div>
-      <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px;">
+      <div class="modal-footer">
         <button class="btn btn-secondary" id="modal-cancel-btn" data-i18n="btn_cancel_modify">Modify Options</button>
         <button class="btn btn-primary" id="modal-confirm-btn" data-i18n="btn_auto_build">Auto-Resolve & Build</button>
       </div>
@@ -420,7 +420,7 @@
 
   <!-- 编译服务器环境与依赖诊断及一键安装弹窗 -->
   <div id="env-modal" class="modal-overlay hidden">
-    <div class="modal-card" style="max-width: 720px;">
+    <div class="modal-card modal-lg">
       <div class="modal-header">
         <div class="modal-title-wrap">
           <span class="modal-badge-warn" id="env-modal-badge">Linux Server</span>
@@ -485,7 +485,7 @@
         </div>
       </div>
 
-      <div class="modal-footer" style="display: flex; justify-content: space-between; align-items: center; margin-top: 16px;">
+      <div class="modal-footer flex-between">
         <button class="btn btn-secondary" id="env-recheck-btn">
           <span class="btn-icon">🔄</span>
           <span data-i18n="btn_recheck_deps">Recheck Environment</span>
