@@ -511,9 +511,9 @@ var OfficialOptions = []model.NginxOption{
 
 // AllowedPathOptions maps safe path configure options.
 var AllowedPathOptions = map[string]struct {
-	Flag        string
-	Default     string
-	Description string
+	Flag        string `json:"flag"`
+	Default     string `json:"default"`
+	Description string `json:"description"`
 }{
 	"prefix": {
 		Flag:        "--prefix",
