@@ -114,6 +114,7 @@ Usage:
 Options:
   -h, --host <ip>        Server listen host/address (default: "0.0.0.0", env: HOST)
   -p, --port <port>      Server listen port (default: "8090", env: PORT)
+  -b, --base-path <path> URL base path prefix for reverse proxy (default: "", env: BASE_PATH)
   -d, --data-dir <path>  Working data directory for builds and cache (default: "./data", env: DATA_DIR)
   -j, --jobs <n>         Max concurrent compilation jobs (default: 2, env: MAX_CONCURRENT_JOBS)
   -t, --timeout <min>    Job execution timeout in minutes (default: 20, env: JOB_TIMEOUT_MINUTES)
@@ -129,6 +130,28 @@ Options:
 
 # Configure 4 concurrent workers and 30-minute job timeout
 ./bin/nginx-builder -jobs 4 -timeout 30
+
+# Mount on a non-root subpath prefix for reverse proxy (e.g. http://www.test.com/nginx)
+./bin/nginx-builder -base-path /nginx -port 8090
+```
+
+### 🔀 Nginx Reverse Proxy Subpath Configuration Example
+
+```nginx
+location /nginx/ {
+    proxy_pass http://127.0.0.1:8090/nginx/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    # Support SSE real-time build & install streaming logs
+    proxy_set_header Connection '';
+    proxy_http_version 1.1;
+    chunked_transfer_encoding off;
+    proxy_buffering off;
+    proxy_cache off;
+}
 ```
 
 ---

@@ -1,9 +1,35 @@
 /**
  * Nginx Online Web Builder - Pluggable i18n Loader & Engine
  * Loads locale definitions from dedicated JSON packs in `/locales/<lang>.json`
- * Supports easy addition of new languages by dropping a `<lang>.json` file
- * and registering it in `locales/languages.json`.
+ * Supports dynamic subpath base URL resolution (e.g. /nginx or root /)
  */
+
+function getAppBasePath() {
+  if (typeof window !== "undefined" && typeof window.__BASE_PATH__ === "string") {
+    return window.__BASE_PATH__.replace(/\/+$/, "");
+  }
+  const meta = typeof document !== "undefined" ? document.querySelector('meta[name="base-path"]') : null;
+  if (meta && meta.content) {
+    return meta.content.replace(/\/+$/, "");
+  }
+  let p = (typeof window !== "undefined" && window.location.pathname) ? window.location.pathname : "/";
+  p = p.replace(/\/[^\/]*\.[a-zA-Z0-9]+$/, ""); // strip filename like index.html
+  p = p.replace(/\/+$/, "");
+  return p;
+}
+
+function apiUrl(path) {
+  if (!path) return path;
+  if (path.startsWith("http://") || path.startsWith("https://")) return path;
+  const base = getAppBasePath();
+  if (!base) return path;
+  if (path === base || path.startsWith(base + "/")) return path;
+  const clean = path.startsWith("/") ? path : "/" + path;
+  return base + clean;
+}
+
+window.getAppBasePath = getAppBasePath;
+window.apiUrl = apiUrl;
 
 const I18N_ENGINE = {
   currentLang: "en",
@@ -36,7 +62,7 @@ const I18N_ENGINE = {
 
     try {
       // 1. Load languages manifest
-      const langResp = await fetch("/locales/languages.json");
+      const langResp = await fetch(apiUrl("/locales/languages.json"));
       if (langResp.ok) {
         this.languages = await langResp.json();
       } else {
@@ -97,7 +123,7 @@ const I18N_ENGINE = {
     if (this.loadedPacks[code]) return this.loadedPacks[code];
 
     try {
-      const resp = await fetch(`/locales/${code}.json`);
+      const resp = await fetch(apiUrl(`/locales/${code}.json`));
       if (resp.ok) {
         const data = await resp.json();
         this.loadedPacks[code] = data;

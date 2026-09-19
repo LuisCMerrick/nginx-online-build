@@ -28,7 +28,7 @@ import (
 // 6. Verifying compiled binary with `objs/nginx -V`
 // 7. Staging and packaging output tar.gz
 // 8. Calculating SHA256 and saving metadata
-func ExecuteBuild(ctx context.Context, job *model.BuildJob, ws *Workspace, cacheDir string, broadcaster *LogBroadcaster) error {
+func ExecuteBuild(ctx context.Context, job *model.BuildJob, ws *Workspace, cacheDir string, basePath string, broadcaster *LogBroadcaster) error {
 	defer broadcaster.Close()
 
 	logWriter := broadcaster
@@ -263,7 +263,7 @@ func ExecuteBuild(ctx context.Context, job *model.BuildJob, ws *Workspace, cache
 	artifactPath := filepath.Join(ws.ArtifactsDir, artifactName)
 
 	writeLog("正在将构建产物打包至: %s ...", artifactPath)
-	artifactInfo, err := packageArtifacts(srcRoot, artifactPath, artifactName, job)
+	artifactInfo, err := packageArtifacts(srcRoot, artifactPath, artifactName, job, basePath)
 	if err != nil {
 		writeErr("打包构建产物失败: %v", err)
 		return fmt.Errorf("打包失败: %w", err)
@@ -346,7 +346,7 @@ func verifyCompiledNginx(ctx context.Context, binPath string, expectedVersion st
 }
 
 // packageArtifacts packages the compiled nginx binary, default conf, and docs into a tar.gz.
-func packageArtifacts(srcRoot, destTarGz, artifactName string, job *model.BuildJob) (*model.ArtifactInfo, error) {
+func packageArtifacts(srcRoot, destTarGz, artifactName string, job *model.BuildJob, basePath string) (*model.ArtifactInfo, error) {
 	outFile, err := os.Create(destTarGz)
 	if err != nil {
 		return nil, err
@@ -406,11 +406,15 @@ func packageArtifacts(srcRoot, destTarGz, artifactName string, job *model.BuildJ
 	}
 
 	shaHex := hex.EncodeToString(hasher.Sum(nil))
+	dlPath := fmt.Sprintf("/api/builds/%s/artifact", job.BuildID)
+	if basePath != "" {
+		dlPath = basePath + dlPath
+	}
 	return &model.ArtifactInfo{
 		Name:        artifactName,
 		Size:        stat.Size(),
 		SHA256:      shaHex,
-		DownloadURL: fmt.Sprintf("/api/builds/%s/artifact", job.BuildID),
+		DownloadURL: dlPath,
 		Path:        destTarGz,
 	}, nil
 }

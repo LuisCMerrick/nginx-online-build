@@ -22,19 +22,28 @@ func NewHandler(mgr *builder.Manager) *Handler {
 }
 
 // RegisterRoutes registers all API routes onto the given http.ServeMux.
-func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/api/nginx/versions", h.handleGetVersions)
-	mux.HandleFunc("/api/nginx/options", h.handleGetOptions)
-	mux.HandleFunc("/api/nginx/deps", h.handleGetDeps)
-	mux.HandleFunc("/api/nginx/preview", h.handlePreview)
+// If basePath is provided (e.g. "/nginx"), routes are registered both with and without the prefix.
+func (h *Handler) RegisterRoutes(mux *http.ServeMux, basePath string) {
+	register := func(pattern string, handlerFunc http.HandlerFunc) {
+		mux.HandleFunc(pattern, handlerFunc)
+		if basePath != "" {
+			mux.HandleFunc(basePath+pattern, handlerFunc)
+		}
+	}
 
-	mux.HandleFunc("/api/builds", h.handleBuilds)
-	mux.HandleFunc("/api/builds/", h.handleBuildByID)
+	register("/api/nginx/versions", h.handleGetVersions)
+	register("/api/nginx/options", h.handleGetOptions)
+	register("/api/nginx/presets", h.handleGetPresets)
+	register("/api/nginx/deps", h.handleGetDeps)
+	register("/api/nginx/preview", h.handlePreview)
+
+	register("/api/builds", h.handleBuilds)
+	register("/api/builds/", h.handleBuildByID)
 
 	// System environment and build dependencies endpoints
-	mux.HandleFunc("/api/system/status", h.handleSystemStatus)
-	mux.HandleFunc("/api/system/deps/install", h.handleInstallSystemDeps)
-	mux.HandleFunc("/api/system/deps/logs", h.handleSystemDepsLogs)
+	register("/api/system/status", h.handleSystemStatus)
+	register("/api/system/deps/install", h.handleInstallSystemDeps)
+	register("/api/system/deps/logs", h.handleSystemDepsLogs)
 }
 
 func (h *Handler) handleGetVersions(w http.ResponseWriter, r *http.Request) {
@@ -65,8 +74,20 @@ func (h *Handler) handleGetOptions(w http.ResponseWriter, r *http.Request) {
 		"success":        true,
 		"options":        nginx.OfficialOptions,
 		"categories":     categories,
+		"presets":        nginx.ParameterPresets,
 		"path_defaults":  nginx.AllowedPathOptions,
 		"dep_libraries":  nginx.DefaultDepLibraries,
+	})
+}
+
+func (h *Handler) handleGetPresets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success": true,
+		"presets": nginx.ParameterPresets,
 	})
 }
 

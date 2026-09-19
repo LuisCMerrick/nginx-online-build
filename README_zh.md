@@ -86,6 +86,7 @@ Usage:
 Options:
   -h, --host <ip>        Server listen host/address (default: "0.0.0.0", env: HOST)
   -p, --port <port>      Server listen port (default: "8090", env: PORT)
+  -b, --base-path <path> URL base path prefix for reverse proxy (default: "", env: BASE_PATH)
   -d, --data-dir <path>  Working data directory for builds and cache (default: "./data", env: DATA_DIR)
   -j, --jobs <n>         Max concurrent compilation jobs (default: 2, env: MAX_CONCURRENT_JOBS)
   -t, --timeout <min>    Job execution timeout in minutes (default: 20, env: JOB_TIMEOUT_MINUTES)
@@ -101,6 +102,28 @@ Options:
 
 # 自定义数据存储目录与 4 个并发编译 Worker
 ./bin/nginx-builder -data-dir /var/lib/nginx-builder -jobs 4 -timeout 30
+
+# 配置非根子路径前缀 (如反向代理至 http://www.test.com/nginx)
+./bin/nginx-builder -base-path /nginx -port 8090
+```
+
+### 🔀 Nginx 反向代理非根路径配置示例
+
+```nginx
+location /nginx/ {
+    proxy_pass http://127.0.0.1:8090/nginx/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    # 保持 SSE 实时编译与安装日志无缓冲流式传输
+    proxy_set_header Connection '';
+    proxy_http_version 1.1;
+    chunked_transfer_encoding off;
+    proxy_buffering off;
+    proxy_cache off;
+}
 ```
 
 ---

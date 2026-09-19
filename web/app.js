@@ -82,11 +82,19 @@ function initEventListeners() {
   });
 
   // Buttons
-  document.getElementById("btn-select-all").addEventListener("click", () => {
-    recommendedPresets.forEach(id => selectedOptionIds.add(id));
-    renderOptionsGrid();
-    triggerPreview();
-  });
+  const btnPresets = document.getElementById("btn-presets-modal") || document.getElementById("btn-select-all");
+  if (btnPresets) {
+    btnPresets.addEventListener("click", () => {
+      openPresetsModal();
+    });
+  }
+
+  const presetQuickSel = document.getElementById("preset-template-select");
+  if (presetQuickSel) {
+    presetQuickSel.addEventListener("change", (e) => {
+      applyPresetTemplate(e.target.value);
+    });
+  }
 
   document.getElementById("btn-reset-default").addEventListener("click", () => {
     selectedOptionIds.clear();
@@ -250,7 +258,7 @@ function updateDepsBadge() {
 // Load Versions
 async function loadVersions() {
   try {
-    const resp = await fetch("/api/nginx/versions");
+    const resp = await fetch(window.apiUrl("/api/nginx/versions"));
     const data = await resp.json();
     if (!data.success || !data.versions) return;
 
@@ -292,7 +300,7 @@ function updateVersionMeta(ver) {
 // Load Options
 async function loadOptions() {
   try {
-    const resp = await fetch("/api/nginx/options");
+    const resp = await fetch(window.apiUrl("/api/nginx/options"));
     const data = await resp.json();
     if (!data.success) return;
 
@@ -301,8 +309,13 @@ async function loadOptions() {
     pathDefaults = data.path_defaults || {};
     depLibraries = data.dep_libraries || {};
 
+    if (data.presets && Array.isArray(data.presets)) {
+      window.parameterPresets = data.presets;
+    }
+    renderPresetsUI();
+
     // Populate initial recommended modules
-    recommendedPresets.forEach(id => selectedOptionIds.add(id));
+    applyPresetTemplate("modern_web", false);
 
     renderTabs();
     renderOptionsGrid();
@@ -455,7 +468,7 @@ function triggerPreview() {
     };
 
     try {
-      const resp = await fetch("/api/nginx/preview", {
+      const resp = await fetch(window.apiUrl("/api/nginx/preview"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
@@ -552,7 +565,7 @@ async function doSubmitBuild(autoResolve) {
   };
 
   try {
-    const resp = await fetch("/api/builds", {
+    const resp = await fetch(window.apiUrl("/api/builds"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
@@ -585,7 +598,7 @@ function watchBuild(buildId) {
     logEventSource.close();
   }
 
-  logEventSource = new EventSource(`/api/builds/${buildId}/logs?stream=true`);
+  logEventSource = new EventSource(window.apiUrl(`/api/builds/${buildId}/logs?stream=true`));
   const term = document.getElementById("terminal-body");
   const autoscroll = document.getElementById("autoscroll-chk");
 
@@ -609,7 +622,7 @@ function watchBuild(buildId) {
 
 async function checkJobStatus(buildId) {
   try {
-    const resp = await fetch(`/api/builds/${buildId}`);
+    const resp = await fetch(window.apiUrl(`/api/builds/${buildId}`));
     const data = await resp.json();
     if (!data.success || !data.build) return;
 
@@ -679,7 +692,8 @@ function showArtifactCard(b) {
   document.getElementById("artifact-size").textContent = `${sizeMb} MB (${b.artifact.size} bytes)`;
 
   const dlLink = document.getElementById("artifact-download-link");
-  dlLink.href = b.artifact.download_url;
+  const downloadUrl = b.artifact.download_url ? window.apiUrl(b.artifact.download_url) : "";
+  dlLink.href = downloadUrl;
   dlLink.setAttribute("download", b.artifact.name);
 
   if (b.verify_result) {
@@ -690,7 +704,7 @@ function showArtifactCard(b) {
 // Load Recent Builds
 async function loadRecentBuilds() {
   try {
-    const resp = await fetch("/api/builds");
+    const resp = await fetch(window.apiUrl("/api/builds"));
     const data = await resp.json();
     if (!data.success || !data.builds) return;
 
@@ -705,8 +719,9 @@ async function loadRecentBuilds() {
       const tr = document.createElement("tr");
       const timeStr = new Date(j.start_time).toLocaleString(currentLang === "zh" ? "zh-CN" : "en-US", { hour12: false });
       const statusBadge = `<span class="status-badge status-${j.status}">${t("step_" + j.status, j.status)}</span>`;
+      const artifactUrl = j.artifact && j.artifact.download_url ? window.apiUrl(j.artifact.download_url) : "#";
       const actionHtml = j.status === "completed" && j.artifact ? 
-        `<a href="${j.artifact.download_url}" class="btn btn-xs btn-success" download>${t("action_download", "Download")}</a>` :
+        `<a href="${artifactUrl}" class="btn btn-xs btn-success" download>${t("action_download", "Download")}</a>` :
         `<button class="btn btn-xs btn-ghost" onclick="watchBuild('${j.build_id}')">${t("action_view", "View Logs")}</button>`;
 
       let extraDesc = "";
@@ -742,7 +757,7 @@ let envLogSource = null;
 
 async function loadSystemStatus() {
   try {
-    const resp = await fetch("/api/system/status");
+    const resp = await fetch(window.apiUrl("/api/system/status"));
     const res = await resp.json();
     if (!res.success || !res.data) return;
 
@@ -883,7 +898,7 @@ async function startInstallDeps() {
   statusPill.textContent = t("btn_installing_deps", "Installing...");
 
   try {
-    const resp = await fetch("/api/system/deps/install", { method: "POST" });
+    const resp = await fetch(window.apiUrl("/api/system/deps/install"), { method: "POST" });
     const res = await resp.json();
     if (!res.success) {
       termBody.textContent += `❌ ${res.error || "Failed to trigger dependency installation"}\n`;
@@ -896,7 +911,7 @@ async function startInstallDeps() {
       envLogSource.close();
     }
 
-    envLogSource = new EventSource("/api/system/deps/logs?stream=true");
+    envLogSource = new EventSource(window.apiUrl("/api/system/deps/logs?stream=true"));
     envLogSource.onmessage = (e) => {
       termBody.textContent += e.data + "\n";
       termBody.scrollTop = termBody.scrollHeight;
@@ -918,8 +933,152 @@ async function startInstallDeps() {
   }
 }
 
+// ===================================================================
+// Parameter Presets & Scenario Templates Management
+// ===================================================================
+
+const fallbackPresetsList = [
+  {
+    id: "modern_web",
+    name: "Standard Web & Reverse Proxy (Recommended)",
+    display_name: "🌐 标准现代 Web 与反向代理 (推荐)",
+    description: "生产主流推荐：启用 HTTPS (SSL/TLS)、HTTP/2、四层 Stream 转发、真实 IP 提取、预压缩静态文件直接分发 (Gzip Static)、状态监控及异步线程池加速。",
+    options: ["http_ssl", "http_v2", "stream", "stream_ssl", "http_realip", "http_gzip_static", "http_stub_status", "pcre_jit", "threads"]
+  },
+  {
+    id: "full_featured",
+    name: "Full-Featured (All Official Modules)",
+    display_name: "🚀 全功能官方模块合集",
+    description: "启用官方绝大多数主流功能：包含 HTTP/2、HTTP/3 (QUIC)、四层全代理、SNI 预读、XSLT、图片剪裁、GeoIP、分片缓存、安全防盗链及动态模块兼容层。",
+    options: ["http_ssl", "http_v2", "http_v3", "stream", "stream_ssl", "stream_ssl_preread", "stream_realip", "http_realip", "http_addition", "http_sub", "http_gunzip", "http_gzip_static", "http_auth_request", "http_secure_link", "http_slice", "http_stub_status", "threads", "file_aio", "pcre_jit", "compat"]
+  },
+  {
+    id: "minimal",
+    name: "Minimal & Tiny Server",
+    display_name: "🪶 极简轻量服务器 (剥离不常用协议)",
+    description: "剥离 FastCGI、uWSGI、SCGI、gRPC 等不需要的网关协议，编译极小体积的高性能轻量 Nginx，适合纯前端分发或轻量代理。",
+    options: ["without_http_fastcgi", "without_http_uwsgi", "without_http_scgi", "without_http_grpc", "pcre_jit"]
+  },
+  {
+    id: "media_streaming",
+    name: "Media Streaming (HLS/MP4/FLV)",
+    display_name: "🎬 音视频流媒体与大文件分发",
+    description: "针对音视频点播与大文件分发优化：包含 MP4 关键帧拖拽寻道、FLV 伪流媒体、大文件分片 Slice 缓存、防盗链 Secure Link 以及高并发异步 I/O (File AIO)。",
+    options: ["http_ssl", "http_v2", "http_flv", "http_mp4", "http_slice", "http_secure_link", "http_realip", "threads", "file_aio", "pcre_jit"]
+  },
+  {
+    id: "l4_gateway",
+    name: "L4 TCP/UDP Load Balancer",
+    display_name: "🔀 四层 TCP/UDP 负载均衡网关",
+    description: "专注于高性能四层流代理：支持 TCP/UDP 负载转发、SSL 终止与透传、SNI / ALPN 预读解析 (无需解密即可按域名路由) 及 Proxy Protocol 客户端真实 IP 传递。",
+    options: ["stream", "stream_ssl", "stream_ssl_preread", "stream_realip", "threads", "pcre_jit", "http_ssl", "http_stub_status"]
+  },
+  {
+    id: "security_hardened",
+    name: "Security Hardened & Access Control",
+    display_name: "🛡️ 安全访问控制与鉴权加固",
+    description: "注重传输安全与权限拦截：启用 HTTPS/QUIC 加密通道、子请求外部统一鉴权 (Auth Request)、带时效与哈希签名的防盗链 (Secure Link) 以及真实客户端 IP 提取。",
+    options: ["http_ssl", "http_v2", "http_v3", "http_realip", "http_auth_request", "http_secure_link", "http_stub_status", "pcre_jit"]
+  },
+  {
+    id: "dynamic_compat",
+    name: "Dynamic Modules Compatible",
+    display_name: "🧩 动态模块二进制兼容 (compat)",
+    description: "启用 --with-compat 保持二进制 ABI 兼容性，方便后续热加载外部第三方 .so 动态模块，并启用异步线程池与 PCRE JIT 即时编译加速。",
+    options: ["compat", "http_ssl", "http_v2", "stream", "stream_ssl", "http_realip", "threads", "file_aio", "pcre_jit"]
+  }
+];
+
+function renderPresetsUI() {
+  const container = document.getElementById("presets-modal-grid");
+  if (!container) return;
+
+  const presets = (window.parameterPresets && window.parameterPresets.length > 0) ? window.parameterPresets : fallbackPresetsList;
+  container.innerHTML = "";
+
+  presets.forEach(p => {
+    const card = document.createElement("div");
+    card.className = "preset-card";
+    
+    // Check if currently all options are selected
+    const isApplied = p.options.every(id => selectedOptionIds.has(id)) && selectedOptionIds.size === p.options.length;
+    if (isApplied) card.classList.add("active");
+
+    const localizedTitle = t("preset_" + p.id + "_title", p.display_name || p.name);
+    const localizedDesc = t("preset_" + p.id + "_desc", p.description);
+    const countText = t("preset_options_count", "{n} options included").replace("{n}", p.options.length);
+
+    card.innerHTML = `
+      <div class="preset-card-header">
+        <h4 class="preset-card-title">${localizedTitle}</h4>
+        <span class="badge-tag">${countText}</span>
+      </div>
+      <p class="preset-desc">${localizedDesc}</p>
+      <div class="preset-tags">
+        ${p.options.map(optId => `<code class="preset-tag-pill">${optId}</code>`).join("")}
+      </div>
+      <div class="preset-footer">
+        <button class="btn btn-sm btn-primary" onclick="applyPresetTemplate('${p.id}')">
+          <span class="btn-icon">✓</span>
+          <span>${t("preset_btn_apply", "Apply Template")}</span>
+        </button>
+      </div>
+    `;
+    container.appendChild(card);
+  });
+}
+
+function openPresetsModal() {
+  renderPresetsUI();
+  const modal = document.getElementById("presets-modal");
+  if (modal) {
+    modal.classList.remove("hidden");
+  }
+}
+
+function closePresetsModal() {
+  const modal = document.getElementById("presets-modal");
+  if (modal) {
+    modal.classList.add("hidden");
+  }
+}
+
+function applyPresetTemplate(presetId, notify = true) {
+  const presets = (window.parameterPresets && window.parameterPresets.length > 0) ? window.parameterPresets : fallbackPresetsList;
+  const p = presets.find(item => item.id === presetId);
+  if (!p) return;
+
+  selectedOptionIds.clear();
+  p.options.forEach(id => selectedOptionIds.add(id));
+
+  renderTabs();
+  renderOptionsGrid();
+  renderPathsGrid();
+  triggerPreview();
+
+  closePresetsModal();
+}
+
+window.openPresetsModal = openPresetsModal;
+window.closePresetsModal = closePresetsModal;
+window.applyPresetTemplate = applyPresetTemplate;
+
 // Wire Event Listeners for System Environment Management
 document.addEventListener("DOMContentLoaded", () => {
+  const btnPresetsModal = document.getElementById("btn-presets-menu");
+  if (btnPresetsModal) {
+    btnPresetsModal.addEventListener("click", openPresetsModal);
+  }
+
+  const presetsModalClose = document.getElementById("presets-modal-close");
+  if (presetsModalClose) {
+    presetsModalClose.addEventListener("click", closePresetsModal);
+  }
+
+  const presetsModalCancel = document.getElementById("presets-modal-cancel");
+  if (presetsModalCancel) {
+    presetsModalCancel.addEventListener("click", closePresetsModal);
+  }
   const envBadge = document.getElementById("env-status-badge");
   if (envBadge) {
     envBadge.addEventListener("click", openEnvModal);

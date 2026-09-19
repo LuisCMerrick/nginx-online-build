@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,7 @@ const AppVersion = "1.0.0"
 type Config struct {
 	Host              string
 	Port              string
+	BasePath          string
 	DataDir           string
 	BuildDir          string
 	CacheDir          string
@@ -38,6 +40,7 @@ func ParseCLI(args []string) *Config {
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		fmt.Fprintf(os.Stderr, "  -h, --host <ip>        Server listen host/address (default: \"0.0.0.0\", env: HOST)\n")
 		fmt.Fprintf(os.Stderr, "  -p, --port <port>      Server listen port (default: \"8090\", env: PORT)\n")
+		fmt.Fprintf(os.Stderr, "  -b, --base-path <path> URL base path prefix for reverse proxy (default: \"\", env: BASE_PATH)\n")
 		fmt.Fprintf(os.Stderr, "  -d, --data-dir <path>  Working data directory for builds and cache (default: \"./data\", env: DATA_DIR)\n")
 		fmt.Fprintf(os.Stderr, "  -j, --jobs <n>         Max concurrent compilation jobs (default: 2, env: MAX_CONCURRENT_JOBS)\n")
 		fmt.Fprintf(os.Stderr, "  -t, --timeout <min>    Job execution timeout in minutes (default: 20, env: JOB_TIMEOUT_MINUTES)\n")
@@ -55,6 +58,8 @@ func ParseCLI(args []string) *Config {
 	if envPort == "" {
 		envPort = "8090"
 	}
+
+	envBasePath := CleanBasePath(os.Getenv("BASE_PATH"))
 
 	envDataDir := os.Getenv("DATA_DIR")
 	if envDataDir == "" {
@@ -78,6 +83,7 @@ func ParseCLI(args []string) *Config {
 	var (
 		hostFlag       string
 		portFlag       string
+		basePathFlag   string
 		dataDirFlag    string
 		jobsFlag       int
 		timeoutFlag    int
@@ -90,6 +96,9 @@ func ParseCLI(args []string) *Config {
 
 	fs.StringVar(&portFlag, "port", envPort, "Listen port")
 	fs.StringVar(&portFlag, "p", envPort, "Listen port (short)")
+
+	fs.StringVar(&basePathFlag, "base-path", envBasePath, "Base URL subpath prefix")
+	fs.StringVar(&basePathFlag, "b", envBasePath, "Base URL subpath prefix (short)")
 
 	fs.StringVar(&dataDirFlag, "data-dir", envDataDir, "Data directory")
 	fs.StringVar(&dataDirFlag, "d", envDataDir, "Data directory (short)")
@@ -143,12 +152,27 @@ func ParseCLI(args []string) *Config {
 	return &Config{
 		Host:              hostFlag,
 		Port:              portFlag,
+		BasePath:          CleanBasePath(basePathFlag),
 		DataDir:           dataDirFlag,
 		BuildDir:          buildDir,
 		CacheDir:          cacheDir,
 		MaxConcurrentJobs: jobsFlag,
 		JobTimeout:        time.Duration(timeoutFlag) * time.Minute,
 	}
+}
+
+// CleanBasePath normalizes URL subpath prefixes (e.g. "/nginx" or "" for root).
+func CleanBasePath(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" || p == "/" || p == "\\" {
+		return ""
+	}
+	p = strings.ReplaceAll(p, "\\", "/")
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	p = strings.TrimRight(p, "/")
+	return p
 }
 
 // LoadConfig maintains backward-compatibility by invoking ParseCLI with os.Args[1:].
