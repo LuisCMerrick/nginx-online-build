@@ -1148,3 +1148,5 @@ body {
   justify-content: flex-end;
 }
 
+
+.status-badge.status-cancelled { background: #334155; color: #cbd5e1; }

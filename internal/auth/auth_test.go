@@ -1,137 +1,125 @@
-package auth_test
+package auth
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"nginx-builder/internal/auth"
 	"nginx-builder/internal/config"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestAuthMiddleware(t *testing.T) {
-	testKey := "test_secret_key_123456"
-	cfg := &config.Config{
-		AuthEnabled: true,
-		AuthKey:     testKey,
-		BasePath:    "",
+func TestAuthenticationAndSessionLifecycle(t *testing.T) {
+	for _, base := range []string{"", "/nginx"} {
+		t.Run(base, func(t *testing.T) {
+			cfg := &config.Config{AuthEnabled: true, AuthKey: "fixed-test-secret", BasePath: base, CookieSecure: true}
+			mw := Middleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("granted")) }))
+			request := func(method, path, body string, cookie *http.Cookie, headers map[string]string) *httptest.ResponseRecorder {
+				r := httptest.NewRequest(method, "https://builder.example"+base+path, strings.NewReader(body))
+				if cookie != nil {
+					r.AddCookie(cookie)
+				}
+				for k, v := range headers {
+					r.Header.Set(k, v)
+				}
+				w := httptest.NewRecorder()
+				mw.ServeHTTP(w, r)
+				return w
+			}
+			for _, path := range []string{"/api/builds", "/api/builds?key=fixed-test-secret"} {
+				if w := request("GET", path, "", nil, nil); w.Code != 401 {
+					t.Fatalf("unauthenticated API: %d", w.Code)
+				}
+			}
+			for _, name := range []string{CookieName, "nginx_builder_key"} {
+				if w := request("GET", "/api/builds", "", &http.Cookie{Name: name, Value: cfg.AuthKey}, nil); w.Code != 401 {
+					t.Fatal("raw-key cookie accepted")
+				}
+			}
+			for k, v := range map[string]string{"X-Auth-Key": cfg.AuthKey, "Authorization": "Bearer " + cfg.AuthKey} {
+				if w := request("GET", "/api/builds", "", nil, map[string]string{k: v}); w.Code != 200 || len(w.Result().Cookies()) != 0 {
+					t.Fatal("header auth failed or issued cookie")
+				}
+			}
+			if w := request("GET", "/", "", nil, nil); w.Code != 401 || !strings.Contains(w.Body.String(), "key-input") {
+				t.Fatal("missing login form")
+			}
+			if w := request("POST", "/api/auth/login", `{"key":"wrong"}`, nil, nil); w.Code != 401 {
+				t.Fatal("invalid key accepted")
+			}
+			if w := request("POST", "/api/auth/login", `{"key":"fixed-test-secret"}`, nil, map[string]string{"Origin": "https://attacker.example"}); w.Code != 403 {
+				t.Fatal("cross-origin login accepted")
+			}
+			w := request("POST", "/api/auth/login", `{"key":"fixed-test-secret"}`, nil, nil)
+			if w.Code != 200 {
+				t.Fatalf("login: %d %s", w.Code, w.Body)
+			}
+			var session *http.Cookie
+			for _, c := range w.Result().Cookies() {
+				if c.Name == CookieName {
+					session = c
+				}
+			}
+			if session == nil || !session.HttpOnly || !session.Secure || session.SameSite != http.SameSiteLaxMode || len(session.Value) != 64 || session.Value == cfg.AuthKey {
+				t.Fatalf("unsafe session: %#v", session)
+			}
+			wantPath := base
+			if wantPath == "" {
+				wantPath = "/"
+			}
+			if session.Path != wantPath {
+				t.Fatal("wrong cookie path")
+			}
+			if w := request("GET", "/api/builds", "", session, nil); w.Code != 200 {
+				t.Fatal("session rejected")
+			}
+			if w := request("POST", "/api/builds", "{}", session, map[string]string{"Origin": "https://attacker.example"}); w.Code != 403 {
+				t.Fatal("cross-origin mutation accepted")
+			}
+			if w := request("POST", "/api/builds", "{}", session, map[string]string{"Origin": "https://builder.example"}); w.Code != 200 {
+				t.Fatal("same-origin mutation rejected")
+			}
+			w = request("GET", "/?key=fixed-test-secret&token=x&auth=y&lang=zh", "", nil, nil)
+			if w.Code != 303 || w.Header().Get("Location") != base+"/?lang=zh" || w.Header().Get("Referrer-Policy") != "no-referrer" {
+				t.Fatalf("unsafe redirect: %d %v", w.Code, w.Header())
+			}
+			if w := request("POST", "/api/auth/logout", "", session, nil); w.Code != 200 {
+				t.Fatal("logout failed")
+			}
+			if w := request("GET", "/api/builds", "", session, nil); w.Code != 401 {
+				t.Fatal("revoked session accepted")
+			}
+		})
 	}
+}
 
-	dummyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ACCESS_GRANTED"))
-	})
+func TestSessionExpiryAndCapacity(t *testing.T) {
+	s := &sessionStore{sessions: map[string]time.Time{"expired": time.Now().Add(-time.Second)}}
+	if s.valid("expired") {
+		t.Fatal("expired session accepted")
+	}
+	for i := 0; i < maxSessions+5; i++ {
+		if _, err := s.create(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(s.sessions) != maxSessions {
+		t.Fatalf("unbounded session store: %d", len(s.sessions))
+	}
+}
 
-	mw := auth.Middleware(cfg, dummyHandler)
-
-	t.Run("API request without key returns 401 JSON", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/api/nginx/versions", nil)
+func TestAuthDisabledAndBodyLimit(t *testing.T) {
+	mw := Middleware(&config.Config{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	for _, size := range []int{0, int(config.MaxRequestBytes) + 1} {
+		r := httptest.NewRequest("POST", "/api/builds", strings.NewReader(strings.Repeat("x", size)))
 		w := httptest.NewRecorder()
-		mw.ServeHTTP(w, req)
-
-		if w.Code != http.StatusUnauthorized {
-			t.Fatalf("expected status 401, got %d", w.Code)
+		mw.ServeHTTP(w, r)
+		want := 200
+		if size > 0 {
+			want = 413
 		}
-		var res map[string]any
-		if err := json.NewDecoder(w.Body).Decode(&res); err != nil {
-			t.Fatalf("failed to decode JSON response: %v", err)
+		if w.Code != want {
+			t.Fatalf("status=%d want=%d", w.Code, want)
 		}
-		if res["success"] != false {
-			t.Fatalf("expected success: false, got %v", res["success"])
-		}
-	})
-
-	t.Run("API request with query param ?key= succeeds and sets cookie", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/api/nginx/versions?key="+testKey, nil)
-		w := httptest.NewRecorder()
-		mw.ServeHTTP(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected status 200, got %d", w.Code)
-		}
-		if w.Body.String() != "ACCESS_GRANTED" {
-			t.Fatalf("expected ACCESS_GRANTED, got %s", w.Body.String())
-		}
-		cookieHeader := w.Header().Get("Set-Cookie")
-		if !strings.Contains(cookieHeader, auth.CookieName+"="+testKey) {
-			t.Fatalf("expected Set-Cookie with auth key, got %s", cookieHeader)
-		}
-	})
-
-	t.Run("API request with X-Auth-Key header succeeds", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/api/nginx/versions", nil)
-		req.Header.Set("X-Auth-Key", testKey)
-		w := httptest.NewRecorder()
-		mw.ServeHTTP(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected status 200, got %d", w.Code)
-		}
-		if w.Body.String() != "ACCESS_GRANTED" {
-			t.Fatalf("expected ACCESS_GRANTED, got %s", w.Body.String())
-		}
-	})
-
-	t.Run("API request with Cookie succeeds", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/api/nginx/versions", nil)
-		req.AddCookie(&http.Cookie{Name: auth.CookieName, Value: testKey})
-		w := httptest.NewRecorder()
-		mw.ServeHTTP(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected status 200, got %d", w.Code)
-		}
-		if w.Body.String() != "ACCESS_GRANTED" {
-			t.Fatalf("expected ACCESS_GRANTED, got %s", w.Body.String())
-		}
-	})
-
-	t.Run("HTML request without key returns 401 HTML challenge form", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		w := httptest.NewRecorder()
-		mw.ServeHTTP(w, req)
-
-		if w.Code != http.StatusUnauthorized {
-			t.Fatalf("expected status 401, got %d", w.Code)
-		}
-		body := w.Body.String()
-		if !strings.Contains(body, "访问鉴权验证") {
-			t.Fatalf("expected HTML challenge containing 访问鉴权验证, got %s", body)
-		}
-		if !strings.Contains(body, "key-input") {
-			t.Fatalf("expected HTML challenge containing key-input form")
-		}
-	})
-
-	t.Run("HTML request with ?key= succeeds", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/?key="+testKey, nil)
-		w := httptest.NewRecorder()
-		mw.ServeHTTP(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected status 200, got %d", w.Code)
-		}
-		if w.Body.String() != "ACCESS_GRANTED" {
-			t.Fatalf("expected ACCESS_GRANTED, got %s", w.Body.String())
-		}
-	})
-
-	t.Run("When auth is disabled (--no-auth), any request passes without key", func(t *testing.T) {
-		disabledCfg := &config.Config{
-			AuthEnabled: false,
-		}
-		mwDisabled := auth.Middleware(disabledCfg, dummyHandler)
-
-		req := httptest.NewRequest("GET", "/api/nginx/versions", nil)
-		w := httptest.NewRecorder()
-		mwDisabled.ServeHTTP(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected status 200, got %d", w.Code)
-		}
-		if w.Body.String() != "ACCESS_GRANTED" {
-			t.Fatalf("expected ACCESS_GRANTED, got %s", w.Body.String())
-		}
-	})
+	}
 }

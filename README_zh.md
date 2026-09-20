@@ -12,7 +12,7 @@
 - 提供官方模块参数目录、安装路径配置和场景预设。参数目录由本仓库维护，具体能否使用仍取决于 Nginx 版本及编译环境。
 - 预览依赖补充和选项冲突。创建任务时若存在未解决冲突，需调整选项或启用 `auto_resolve_conflicts`。
 - 支持从预设或自定义源码压缩包 URL 构建 OpenSSL、PCRE/PCRE2、zlib。这些是依赖库源码，不是任意第三方 Nginx 模块上传功能。
-- 支持任务排队、并发限制、SSE 实时日志，以及通过 API 请求取消任务。
+- 支持有界任务排队、并发限制、SSE 实时日志，以及通过 Web 界面或 API 取消任务。
 - 记录源码和产物 SHA-256，检查 `nginx -V`，在可用时记录 `ldd` 输出，并对打包后的二进制执行配置冒烟检查。
 - 默认启用共享访问密钥，支持 URL 子路径部署和中英文界面。部分后端消息及鉴权页面仍为中文。
 
@@ -52,7 +52,7 @@ docker run -d \
 docker logs nginx-builder
 ```
 
-在 Docker 宿主机打开 `http://127.0.0.1:8090/`，输入启动日志中的密钥；也可使用日志打印的 `?key=...` 链接，并按实际环境替换主机地址。`0.0.0.0` 是监听地址，不是客户端访问地址。远程访问可通过 HTTPS 反向代理或 SSH 隧道。
+在 Docker 宿主机打开 `http://127.0.0.1:8090/`，输入配置的 `AUTH_KEY`；未配置时，使用本次启动日志中自动生成的密钥。固定密钥不会写入启动日志。`0.0.0.0` 是监听地址，不是客户端访问地址。远程访问可通过 HTTPS 反向代理或 SSH 隧道。
 
 也可以使用仓库提供的 Compose 配置：
 
@@ -81,7 +81,7 @@ mkdir -p data
 ./bin/nginx-builder --host 127.0.0.1 --data-dir "$(pwd)/data"
 ```
 
-建议使用**绝对数据目录**，尤其是启用依赖库源码编译时。目前程序切换到 Nginx 源码目录后，仍将依赖目录路径直接传给 configure；默认相对路径 `./data` 在此场景下可能导致构建失败。
+相对或绝对数据目录均受支持；启动时统一转为绝对路径，并检查目录创建及写入权限，失败则退出。传给依赖源码 configure 参数的目录也是绝对路径。
 
 网页依赖安装功能使用预定义包名映射，通过参数数组调用包管理器。安装目标是服务所在环境：Docker 部署时为容器，直接部署时为宿主机。自动安装需要 root 或程序检测到的免密 sudo 权限；提前安装依赖后，普通编译任务无需这些权限。
 
@@ -100,22 +100,28 @@ mkdir -p data
 | `--data-dir` | `-d` | `DATA_DIR` | `./data` |
 | `--jobs` | `-j` | `MAX_CONCURRENT_JOBS` | `2` |
 | `--timeout` | `-t` | `JOB_TIMEOUT_MINUTES` | `20` 分钟 |
+| `--queue-limit` | — | `MAX_QUEUED_JOBS` | `16` |
+| `--retain-builds` | — | `MAX_RETAINED_BUILDS` | `20` 个终态任务 |
+| `--max-download-mb` | — | `MAX_DOWNLOAD_MB` | `256` MiB |
+| `--max-cache-mb` | — | `MAX_CACHE_MB` | `1024` MiB |
+| `--cookie-secure` | — | `COOKIE_SECURE` | `false`；HTTPS 反代需设为 `true` |
 | `--version` | `-v` | — | 输出服务端版本后退出 |
 | `--help` | — | — | 输出帮助后退出 |
 
 未设置 `AUTH_ENABLED` 时兼容旧环境变量 `AUTH`。`AUTH_ENABLED` 为 `false`、`0`、`no`、`off` 时关闭鉴权。并发数、超时时间为非正数时回退到内置默认值。
 
-`--jobs` 控制同时执行的任务数，每个任务的 make 并行度最多为 `min(runtime.NumCPU(), 8)`。任务超时从等待 Worker 时开始计时，排队时间包含在内；下载和解压尚未完整接入任务 context，因此该值不是严格的端到端截止时间。
+`--jobs` 控制同时执行的任务数，每个任务的 make 并行度最多为 `min(runtime.NumCPU(), 8)`。任务超时从入队时开始计时，覆盖下载、解压、configure、make、打包和验证。取消会终止构建进程组，并统一记录终态和结束时间、关闭日志流。
 
 ### 鉴权
 
-所有路由共用一个密钥。凭据按以下顺序读取：
+所有路由共用一个管理密钥，持有者对构建历史、产物、取消任务及依赖安装拥有相同访问能力。
 
-1. URL 参数：`?key=...`、`?token=...`、`?auth=...`。
-2. Cookie：`nginx_builder_key`。
-3. 请求头：`X-Auth-Key: ...` 或 `Authorization: Bearer ...`。
+- 浏览器登录：页面通过 `POST /api/auth/login` 提交 `{"key":"…"}`，换取 `nginx_builder_session` 会话 Cookie。它包含随机会话标识，设置 `HttpOnly`、`SameSite=Lax`，有效期 12 小时。会话只存在服务内存中；重启后需重新登录。
+- HTTPS 反向代理：配置 `COOKIE_SECURE=true` 或 `--cookie-secure`，确保 Cookie 带 `Secure`。后端不凭任意客户端传来的 `X-Forwarded-Proto` 决定 Cookie 安全属性。
+- API 客户端：使用 `X-Auth-Key: ...` 或 `Authorization: Bearer ...`。前端 API、语言包、下载及 SSE 使用同源会话，不再将密钥存入 localStorage 或附加到 URL。
+- 退出：`POST /api/auth/logout` 撤销当前服务端会话并清除 Cookie。会话鉴权的写请求拒绝不匹配的浏览器 Origin。
 
-持有密钥的用户对构建历史、产物、取消任务及依赖安装拥有相同访问能力。密钥会出现在启动日志中；前端也会将其保存在 localStorage，并附加到 API/SSE URL。当前 Cookie 未设置 `HttpOnly` 和 `Secure`。部署时使用 HTTPS，保护或脱敏包含查询参数的日志；API 客户端优先使用请求头。修改配置密钥可使旧凭据失效，更换密钥后需清理浏览器中的旧凭据。
+**升级说明：** 旧的 `nginx_builder_key` Cookie 不再有效，旧 localStorage 密钥会被清除，请重新登录。入口页面仍兼容 `?key=...`、`?token=...`、`?auth=...` 登录，并立即重定向到移除凭据的地址；API 查询参数鉴权已移除，请改用请求头。入口 URL 仍可能进入浏览器或代理历史，优先使用登录表单并保护访问日志。固定 `AUTH_KEY` 不写入普通启动日志，也不传入构建子进程环境；未配置密钥时，只在启动时打印本次自动生成的密钥。
 
 ## 子路径反向代理
 
@@ -124,7 +130,7 @@ mkdir -p data
 ```bash
 ./bin/nginx-builder \
   --host 127.0.0.1 --port 8090 \
-  --base-path /nginx --data-dir "$(pwd)/data"
+  --base-path /nginx --data-dir "$(pwd)/data" --cookie-secure
 ```
 
 在提供 HTTPS 的 Nginx server 中添加：
@@ -159,6 +165,8 @@ location /nginx/ {
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
+| POST | `/api/auth/login` | 密钥换取浏览器会话，JSON 字段 `key` |
+| POST | `/api/auth/logout` | 撤销当前会话 |
 | GET | `/api/nginx/versions` | 获取版本列表 |
 | GET | `/api/nginx/options` | 参数目录、分类、路径默认值、预设和依赖库列表 |
 | GET | `/api/nginx/presets` | 场景预设 |
@@ -192,17 +200,19 @@ curl --fail-with-body \
   http://127.0.0.1:8090/api/builds
 ```
 
-`options` 传入参数目录中的 **ID**，不是原始 configure 参数。请求还支持 `path_overrides` 和 `third_party_sources`，字段定义见 [model.go](internal/model/model.go)。请省略 `target_os`、`target_arch`：这两个字段仅影响产物标签，不会配置交叉编译，当前校验也不充分。
+`options` 传入参数目录中的 **ID**，不是原始 configure 参数。请求还支持 `path_overrides` 和 `third_party_sources`，字段定义见 [model.go](internal/model/model.go)。
 
-预览成功只说明已生成参数，不代表源码地址、依赖组合或历史 Nginx 版本一定能编译。未知选项 ID 和部分无效覆盖值目前会被静默忽略，请核对最终生成的参数。取消构建目前通过 API 操作；Web 界面没有构建取消按钮，对 `cancelled` 终态的处理也不完整。
+预览成功只说明已生成参数，不代表源码地址、依赖组合或历史 Nginx 版本一定能编译。未知选项 ID、JSON 字段、路径覆盖键和非法值返回 400；路径参数顺序固定，自动调和后再次检查依赖和冲突。`target_os`、`target_arch` 可省略；指定时必须与服务宿主平台一致，目前不支持交叉编译。
+
+请求体上限 64 KiB，超出返回 413；同时受理的未结束任务最多为 `--jobs + --queue-limit`，超出返回 429 和 `Retry-After: 5`。登录 JSON 另有 4 KiB 上限。Web 界面提供取消按钮，并将 `cancelled` 作为终态停止轮询、关闭 SSE 和恢复按钮。
 
 ## 源码信任与执行边界
 
-- 下载器会记录每份源码的 SHA-256；只有选定条目包含 `ExpectedSHA` 时才比较预期哈希。动态获取的 Nginx 版本和自定义源码 URL 通常没有该值；仅计算哈希不能证明源码来源，当前也未实现签名验证。
+- 下载器会记录每份源码的 SHA-256；只有选定条目包含 `ExpectedSHA` 时才比较预期哈希。动态列表会为匹配的内置版本保留预期哈希，其他版本和自定义源码 URL 可能没有该值；仅计算哈希不能证明源码来源，当前也未实现签名验证。
 - 预设依赖版本和哈希维护在代码中。标注“最新”“推荐”的预设不会自动跟随上游更新。
 - 下载过程在域名解析、实际连接及重定向阶段检查目标地址，拒绝私有或本地目标。这不能限制下载完成后构建脚本的行为。
-- 解压器检查目录越界；每个压缩包限制 20,000 个条目、单个普通文件 512 MiB、普通文件总内容 1 GiB，并跳过链接及特殊文件。这不等于任务磁盘配额，压缩包下载本身也没有明确体积上限。
-- configure、依赖构建脚本、make 和二进制验证都继承服务账户权限及环境变量。即使源码由后端下载，自定义源码包仍需作为可执行代码信任。
+- 解压器检查目录越界；每个压缩包限制 20,000 个条目、单个普通文件 512 MiB、普通文件总内容 1 GiB，并跳过链接及特殊文件。压缩包下载默认上限 256 MiB，即使响应没有 Content-Length 也检查实际接收字节数。缓存命中同样检查体积和可用的预期哈希；写入/复用缓存时按最近使用时间清理至默认 1024 MiB。临时下载文件在失败或取消后移除。
+- configure、依赖构建脚本、make 和二进制验证都继承服务账户权限及环境变量（移除 `AUTH_KEY`）。即使源码由后端下载，自定义源码包仍需作为可执行代码信任。
 - 当前镜像内的服务以 root 运行，所有任务共用一个容器。容器与宿主机之间的边界取决于运行参数和挂载，它不提供任务间隔离；避免特权模式及无关宿主目录挂载。
 
 ## 数据与产物
@@ -217,7 +227,9 @@ curl --fail-with-body \
 | `builds/<id>/logs/` | `build.log`、`configure.log`、`error.log` |
 | `builds/<id>/artifacts/` | 生成的 `.tar.gz` |
 
-构建成功后删除 `source/`、`deps/`、`work/`；失败或取消的任务可能保留这些目录。目前没有定时保留策略或清理 API，内部 `PruneOldBuilds` 尚未接入运行流程，需安排磁盘监控及停机清理历史任务、缓存。
+Worker 结束后，无论成功、失败或取消，均清理 `source/`、`deps/`、`work/`，保留日志、元数据及已有产物。启动和每次任务收尾时，按创建时间保留最近 `--retain-builds` 个终态任务（默认 20），清理其余任务的整个目录；仍在退出的 Worker 不参与清理。升级前请备份需要长期保留的构建。重启时，所有遗留非终态任务（含 packaging）标记为中断失败并保存。
+
+每份构建日志上限约 16 MiB（build.log 可额外包含截断提示）；configure/error 日志也限制为 16 MiB。单次二进制检查输出限制为 1 MiB，前端终端只保留最近 1,048,576 个字符。HTTP 请求头读取超时 10 秒、请求读取超时 30 秒、空闲连接超时 60 秒，不设置全局写超时以支持 SSE。这些限额不构成编译进程 CPU、内存或磁盘的硬配额，仍需部署环境的资源限制；不要让多个服务进程共用同一个 DATA_DIR。
 
 压缩包包含 `sbin/nginx`、`conf/`、`logs/`、存在时的 `html/`、打包的 `modules/*.so` 和 `BUILD_INFO.json`。程序不会执行 `make install`，也不会安装系统服务。自定义 configure 路径改变二进制默认值，不改变压缩包目录布局；随包配置来自源码树，可能需要按所选模块调整。
 
@@ -231,7 +243,7 @@ ldd ./sbin/nginx
 ./sbin/nginx -t -p "$PWD/" -c "$PWD/conf/nginx.conf" -e logs/error.log
 ```
 
-内置冒烟检查使用生成的最小配置，不是随包配置或生产配置。目前只要输出含 `syntax is ok`，即使 `nginx -t` 非零退出也可能判定通过，因此 `completed` 不能替代目标机检查。`BUILD_INFO.json` 在冒烟检查之前生成；最终结果应查看任务 API 或 `meta.json`。
+内置冒烟检查使用生成的最小配置，PID、日志和临时目录均位于临时测试目录，采用当前测试账户和高端口。版本必须精确匹配，`nginx -t` 非零退出一律失败。它不验证随包配置或生产配置，`completed` 仍不能替代目标机检查。`BUILD_INFO.json` 在最终冒烟检查之前生成，明确记录 packaging 状态；最终结果应查看任务 API 或 `meta.json`。
 
 ## 开发与语言包
 
@@ -239,6 +251,7 @@ ldd ./sbin/nginx
 go test ./...
 go test -race ./...
 go vet ./...
+node --test web/app_test.js
 go build -o bin/nginx-builder ./cmd/server
 ```
 

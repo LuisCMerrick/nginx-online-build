@@ -51,9 +51,19 @@ func IsPrivateIP(ip net.IP) bool {
 
 // ValidateURLHost checks if the hostname or IP of a target URL resolves to a private IP.
 func ValidateURLHost(targetURL string) error {
+	return ValidateURLHostContext(context.Background(), targetURL)
+}
+
+func ValidateURLHostContext(ctx context.Context, targetURL string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	u, err := url.Parse(targetURL)
 	if err != nil {
 		return fmt.Errorf("URL 格式无效: %w", err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+		return fmt.Errorf("仅支持不含用户凭据的 HTTP(S) URL")
 	}
 
 	host := u.Hostname()
@@ -70,7 +80,7 @@ func ValidateURLHost(targetURL string) error {
 	}
 
 	// Resolve hostname
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
 	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
@@ -139,7 +149,7 @@ func NewSafeHTTPClient(timeout time.Duration) *http.Client {
 			if len(via) >= 10 {
 				return fmt.Errorf("重定向次数过多 (超过 10 次)")
 			}
-			if err := ValidateURLHost(req.URL.String()); err != nil {
+			if err := ValidateURLHostContext(req.Context(), req.URL.String()); err != nil {
 				return fmt.Errorf("重定向目标受到安全拦截: %w", err)
 			}
 			return nil

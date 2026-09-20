@@ -3,6 +3,7 @@ package nginx
 import (
 	"fmt"
 	"nginx-builder/internal/model"
+	"sort"
 	"strings"
 )
 
@@ -43,36 +44,36 @@ var OfficialOptions = []model.NginxOption{
 		ConflictsWith: []string{"without_http"},
 	},
 	{
-		ID:            "stream_ssl",
-		Name:          "--with-stream_ssl_module",
-		Flag:          "--with-stream_ssl_module",
-		Description:   "启用 Stream TCP/UDP SSL/TLS 终止与代理支持",
-		DefaultState:  false,
-		Category:      model.CategorySSL,
-		Type:          "bool",
-		DependsOn:     []string{"stream"},
-		RequiresLib:   "OpenSSL",
+		ID:           "stream_ssl",
+		Name:         "--with-stream_ssl_module",
+		Flag:         "--with-stream_ssl_module",
+		Description:  "启用 Stream TCP/UDP SSL/TLS 终止与代理支持",
+		DefaultState: false,
+		Category:     model.CategorySSL,
+		Type:         "bool",
+		DependsOn:    []string{"stream"},
+		RequiresLib:  "OpenSSL",
 	},
 	{
-		ID:            "stream_ssl_preread",
-		Name:          "--with-stream_ssl_preread_module",
-		Flag:          "--with-stream_ssl_preread_module",
-		Description:   "启用 Stream SSL ClientHello 预读模块（支持根据 SNI / ALPN 路由而无需解密）",
-		DefaultState:  false,
-		Category:      model.CategorySSL,
-		Type:          "bool",
-		DependsOn:     []string{"stream"},
+		ID:           "stream_ssl_preread",
+		Name:         "--with-stream_ssl_preread_module",
+		Flag:         "--with-stream_ssl_preread_module",
+		Description:  "启用 Stream SSL ClientHello 预读模块（支持根据 SNI / ALPN 路由而无需解密）",
+		DefaultState: false,
+		Category:     model.CategorySSL,
+		Type:         "bool",
+		DependsOn:    []string{"stream"},
 	},
 	{
-		ID:            "mail_ssl",
-		Name:          "--with-mail_ssl_module",
-		Flag:          "--with-mail_ssl_module",
-		Description:   "启用 Mail 模块 SSL/TLS 支持 (STARTTLS / SSL)",
-		DefaultState:  false,
-		Category:      model.CategorySSL,
-		Type:          "bool",
-		DependsOn:     []string{"mail"},
-		RequiresLib:   "OpenSSL",
+		ID:           "mail_ssl",
+		Name:         "--with-mail_ssl_module",
+		Flag:         "--with-mail_ssl_module",
+		Description:  "启用 Mail 模块 SSL/TLS 支持 (STARTTLS / SSL)",
+		DefaultState: false,
+		Category:     model.CategorySSL,
+		Type:         "bool",
+		DependsOn:    []string{"mail"},
+		RequiresLib:  "OpenSSL",
 	},
 
 	// ==================== HTTP Modules ====================
@@ -399,13 +400,13 @@ var OfficialOptions = []model.NginxOption{
 
 	// ==================== 核心子系统与功能禁用 (--without-xxx) ====================
 	{
-		ID:            "without_http",
-		Name:          "--without-http",
-		Flag:          "--without-http",
-		Description:   "完全禁用 HTTP 服务核心（仅用于纯四层 Stream 或 Mail 代理）",
-		DefaultState:  false,
-		Category:      model.CategoryOther,
-		Type:          "bool",
+		ID:           "without_http",
+		Name:         "--without-http",
+		Flag:         "--without-http",
+		Description:  "完全禁用 HTTP 服务核心（仅用于纯四层 Stream 或 Mail 代理）",
+		DefaultState: false,
+		Category:     model.CategoryOther,
+		Type:         "bool",
 		ConflictsWith: []string{
 			"http_ssl", "http_v2", "http_v3", "http_realip", "http_addition",
 			"http_sub", "http_dav", "http_flv", "http_mp4", "http_gunzip",
@@ -583,6 +584,42 @@ func ValidateAndBuildArgs(
 	resolvedDepDirs map[string]string, // map of "openssl" -> "/path/to/extracted/openssl"
 	autoResolveConflicts bool,
 ) ([]string, []string, []string, error) {
+	for _, id := range selectedIDs {
+		if FindOption(strings.TrimSpace(id)) == nil {
+			return nil, nil, nil, fmt.Errorf("unknown option ID: %q", id)
+		}
+	}
+	for key, value := range pathOverrides {
+		if _, ok := AllowedPathOptions[key]; !ok {
+			return nil, nil, nil, fmt.Errorf("unknown path option: %q", key)
+		}
+		if strings.TrimSpace(value) == "" || !isValidPath(strings.TrimSpace(value)) {
+			return nil, nil, nil, fmt.Errorf("invalid value for %s", key)
+		}
+		if (key == "user" || key == "group") && !isAlphaNumWord(strings.TrimSpace(value)) {
+			return nil, nil, nil, fmt.Errorf("invalid account name for %s", key)
+		}
+	}
+	if thirdParty != nil {
+		deps := []struct {
+			name, version, url, opt string
+			enabled                 bool
+		}{
+			{"openssl", thirdParty.OpenSSLVersion, thirdParty.OpenSSLSourceURL, thirdParty.OpenSSLOpt, thirdParty.UseOpenSSLSource},
+			{"pcre", thirdParty.PCREVersion, thirdParty.PCRESourceURL, thirdParty.PCREOpt, thirdParty.UsePCRESource},
+			{"zlib", thirdParty.ZlibVersion, thirdParty.ZlibSourceURL, thirdParty.ZlibOpt, thirdParty.UseZlibSource},
+		}
+		for _, dep := range deps {
+			if dep.opt != "" && !isValidOpt(dep.opt) {
+				return nil, nil, nil, fmt.Errorf("invalid %s compiler options", dep.name)
+			}
+			if dep.enabled {
+				if _, err := ResolveDepSource(dep.name, dep.version, dep.url); err != nil {
+					return nil, nil, nil, err
+				}
+			}
+		}
+	}
 	userExplicit := make(map[string]bool)
 	selectedMap := make(map[string]bool)
 	for _, id := range selectedIDs {
@@ -611,8 +648,14 @@ func ValidateAndBuildArgs(
 	// Third-party OpenSSL source automatic SSL enablement
 	if thirdParty != nil && thirdParty.UseOpenSSLSource {
 		if !selectedMap["http_ssl"] && !selectedMap["stream_ssl"] && !selectedMap["mail_ssl"] {
-			selectedMap["http_ssl"] = true
-			warnings = append(warnings, "由于启用了 OpenSSL 源码静态编译，已自动激活依赖的 --with-http_ssl_module")
+			if selectedMap["without_http"] && selectedMap["stream"] {
+				selectedMap["stream_ssl"] = true
+			} else if selectedMap["without_http"] && selectedMap["mail"] {
+				selectedMap["mail_ssl"] = true
+			} else {
+				selectedMap["http_ssl"] = true
+			}
+			warnings = append(warnings, "已为 OpenSSL 源码编译启用对应服务的 TLS 模块")
 		}
 		// OpenSSL 1.1.1w does NOT support HTTP/3 (QUIC)
 		if thirdParty.OpenSSLVersion == "1.1.1w" && selectedMap["http_v3"] {
@@ -749,17 +792,55 @@ func ValidateAndBuildArgs(
 		}
 	}
 
+	// Restore dependency closure after conflict resolution; reject unresolved conflicts.
+	if autoResolveConflicts {
+		for pass := 0; pass < len(OfficialOptions); pass++ {
+			changed := false
+			for _, opt := range OfficialOptions {
+				if selectedMap[opt.ID] {
+					for _, dep := range opt.DependsOn {
+						if !selectedMap[dep] {
+							selectedMap[dep] = true
+							changed = true
+						}
+					}
+				}
+			}
+			if !changed {
+				break
+			}
+		}
+		if selectedMap["without_pcre"] && !selectedMap["without_http"] {
+			selectedMap["without_http_rewrite"] = true
+		}
+		for _, opt := range OfficialOptions {
+			if selectedMap[opt.ID] {
+				for _, other := range opt.ConflictsWith {
+					if selectedMap[other] {
+						return nil, warnings, nil, fmt.Errorf("cannot reconcile %s with %s; adjust the selected options", opt.ID, other)
+					}
+				}
+			}
+		}
+	}
+
 	// 3. Construct arguments strictly from whitelist
 	var args []string
 
 	// Handle prefix and paths first
 	prefix := "/usr/local/nginx"
-	if p, ok := pathOverrides["prefix"]; ok && isValidPath(p) {
+	if p, ok := pathOverrides["prefix"]; ok && isValidPath(strings.TrimSpace(p)) {
 		prefix = strings.TrimSpace(p)
 	}
 	args = append(args, fmt.Sprintf("--prefix=%s", prefix))
 
-	for key, meta := range AllowedPathOptions {
+	pathKeys := make([]string, 0, len(AllowedPathOptions))
+	for key := range AllowedPathOptions {
+		pathKeys = append(pathKeys, key)
+	}
+	sort.Strings(pathKeys)
+	for _, key := range pathKeys {
+		meta := AllowedPathOptions[key]
 		if key == "prefix" {
 			continue
 		}
@@ -832,7 +913,7 @@ func ValidateAndBuildArgs(
 
 // isValidPath ensures paths do not contain dangerous characters or shell injection tokens.
 func isValidPath(p string) bool {
-	if strings.ContainsAny(p, "\n\r\t;&|`$<>(){}[]*?\\'\"") {
+	if strings.ContainsAny(p, " \x00\n\r\t;&|`$<>(){}[]*?\\'\"") {
 		return false
 	}
 	if !strings.HasPrefix(p, "/") && !isAlphaNumWord(p) {
@@ -843,7 +924,7 @@ func isValidPath(p string) bool {
 
 // isValidOpt validates optional compiler flags like enable-tls1_3, no-deprecated, etc.
 func isValidOpt(opt string) bool {
-	if strings.ContainsAny(opt, "\n\r\t;&|`$<>(){}[]*?\\'\"") {
+	if strings.ContainsAny(opt, "\x00\n\r\t;&|`$<>(){}[]*?\\'\"") {
 		return false
 	}
 	return len(opt) < 128

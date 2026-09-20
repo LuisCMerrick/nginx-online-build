@@ -52,18 +52,18 @@ type NginxOption struct {
 
 // VersionInfo represents Nginx release version details.
 type VersionInfo struct {
-	Version      string `json:"version"`
-	Channel      string `json:"channel"` // "stable", "mainline", "legacy"
-	ReleaseDate  string `json:"release_date,omitempty"`
-	SourceURL    string `json:"source_url"`
-	ExpectedSHA  string `json:"expected_sha256,omitempty"`
-	IsDefault    bool   `json:"is_default"`
+	Version     string `json:"version"`
+	Channel     string `json:"channel"` // "stable", "mainline", "legacy"
+	ReleaseDate string `json:"release_date,omitempty"`
+	SourceURL   string `json:"source_url"`
+	ExpectedSHA string `json:"expected_sha256,omitempty"`
+	IsDefault   bool   `json:"is_default"`
 }
 
 // DepLibraryInfo represents a preset third-party source library (OpenSSL, PCRE, zlib).
 type DepLibraryInfo struct {
-	Name        string `json:"name"`        // "openssl", "pcre", "zlib"
-	DisplayName string `json:"display_name"`// "OpenSSL 3.4.1", etc.
+	Name        string `json:"name"`         // "openssl", "pcre", "zlib"
+	DisplayName string `json:"display_name"` // "OpenSSL 3.4.1", etc.
 	Version     string `json:"version"`
 	SourceURL   string `json:"source_url"`
 	ExpectedSHA string `json:"expected_sha256,omitempty"`
@@ -125,30 +125,30 @@ type HostInfo struct {
 
 // BuildJob represents a complete Nginx build task with state and audit data.
 type BuildJob struct {
-	mu                  sync.RWMutex           `json:"-"`
-	BuildID             string                 `json:"build_id"`
-	NginxVersion        string                 `json:"nginx_version"`
-	TargetOS            string                 `json:"target_os"`
-	TargetArch          string                 `json:"target_arch"`
-	Options             []string               `json:"options"`               // Selected option IDs
-	PathOverrides       map[string]string      `json:"path_overrides,omitempty"`
-	ThirdPartySources   *ThirdPartySourcesSpec `json:"third_party_sources,omitempty"` // OpenSSL, PCRE, zlib
-	ConfigureArguments  []string               `json:"configure_arguments"`   // Structured ./configure args
-	FullConfigureCmd    string                 `json:"full_configure_cmd"`    // Preview ./configure string
-	Status              BuildStatus            `json:"status"`
-	CurrentStep         string                 `json:"current_step"`
-	Progress            int                    `json:"progress"`              // 0 - 100 percentage
-	StartTime           time.Time              `json:"start_time"`
-	EndTime             *time.Time             `json:"end_time,omitempty"`
-	DurationSeconds     float64                `json:"duration_seconds"`
-	CompilerVersion     string                 `json:"compiler_version"`
-	Artifact            *ArtifactInfo          `json:"artifact,omitempty"`
-	SourceURL           string                 `json:"source_url"`
-	SourceSHA256        string                 `json:"source_sha256"`
-	HostInfo            *HostInfo              `json:"host_info,omitempty"`
-	VerifyResult        *VerifyResult          `json:"verify_result,omitempty"`
-	ErrorMessage        string                 `json:"error_message,omitempty"`
-	LogFilePath         string                 `json:"log_file_path,omitempty"`
+	mu                 sync.RWMutex           `json:"-"`
+	BuildID            string                 `json:"build_id"`
+	NginxVersion       string                 `json:"nginx_version"`
+	TargetOS           string                 `json:"target_os"`
+	TargetArch         string                 `json:"target_arch"`
+	Options            []string               `json:"options"` // Selected option IDs
+	PathOverrides      map[string]string      `json:"path_overrides,omitempty"`
+	ThirdPartySources  *ThirdPartySourcesSpec `json:"third_party_sources,omitempty"` // OpenSSL, PCRE, zlib
+	ConfigureArguments []string               `json:"configure_arguments"`           // Structured ./configure args
+	FullConfigureCmd   string                 `json:"full_configure_cmd"`            // Preview ./configure string
+	Status             BuildStatus            `json:"status"`
+	CurrentStep        string                 `json:"current_step"`
+	Progress           int                    `json:"progress"` // 0 - 100 percentage
+	StartTime          time.Time              `json:"start_time"`
+	EndTime            *time.Time             `json:"end_time,omitempty"`
+	DurationSeconds    float64                `json:"duration_seconds"`
+	CompilerVersion    string                 `json:"compiler_version"`
+	Artifact           *ArtifactInfo          `json:"artifact,omitempty"`
+	SourceURL          string                 `json:"source_url"`
+	SourceSHA256       string                 `json:"source_sha256"`
+	HostInfo           *HostInfo              `json:"host_info,omitempty"`
+	VerifyResult       *VerifyResult          `json:"verify_result,omitempty"`
+	ErrorMessage       string                 `json:"error_message,omitempty"`
+	LogFilePath        string                 `json:"log_file_path,omitempty"`
 }
 
 // Clone returns a deep copy of BuildJob to prevent data races when reading state concurrently.
@@ -160,21 +160,21 @@ func (j *BuildJob) Clone() *BuildJob {
 	defer j.mu.RUnlock()
 
 	clone := &BuildJob{
-		BuildID:            j.BuildID,
-		NginxVersion:       j.NginxVersion,
-		TargetOS:           j.TargetOS,
-		TargetArch:         j.TargetArch,
-		FullConfigureCmd:   j.FullConfigureCmd,
-		Status:             j.Status,
-		CurrentStep:        j.CurrentStep,
-		Progress:           j.Progress,
-		StartTime:          j.StartTime,
-		DurationSeconds:    j.DurationSeconds,
-		CompilerVersion:    j.CompilerVersion,
-		SourceURL:          j.SourceURL,
-		SourceSHA256:       j.SourceSHA256,
-		ErrorMessage:       j.ErrorMessage,
-		LogFilePath:        j.LogFilePath,
+		BuildID:          j.BuildID,
+		NginxVersion:     j.NginxVersion,
+		TargetOS:         j.TargetOS,
+		TargetArch:       j.TargetArch,
+		FullConfigureCmd: j.FullConfigureCmd,
+		Status:           j.Status,
+		CurrentStep:      j.CurrentStep,
+		Progress:         j.Progress,
+		StartTime:        j.StartTime,
+		DurationSeconds:  j.DurationSeconds,
+		CompilerVersion:  j.CompilerVersion,
+		SourceURL:        j.SourceURL,
+		SourceSHA256:     j.SourceSHA256,
+		ErrorMessage:     j.ErrorMessage,
+		LogFilePath:      j.LogFilePath,
 	}
 
 	if len(j.Options) > 0 {
@@ -263,4 +263,9 @@ type PreviewResponse struct {
 	ValidationWarn []string `json:"validation_warnings,omitempty"`
 	Conflicts      []string `json:"conflicts,omitempty"`
 	HasConflicts   bool     `json:"has_conflicts"`
+}
+
+// IsTerminal reports states that must not be overwritten by later worker phases.
+func IsTerminal(status BuildStatus) bool {
+	return status == StatusCompleted || status == StatusFailed || status == StatusCancelled
 }

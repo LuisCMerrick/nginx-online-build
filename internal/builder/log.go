@@ -3,6 +3,7 @@ package builder
 import (
 	"fmt"
 	"io"
+	"nginx-builder/internal/config"
 	"os"
 	"sync"
 )
@@ -13,6 +14,8 @@ type LogBroadcaster struct {
 	file      *os.File
 	listeners map[chan string]struct{}
 	closed    bool
+	size      int64
+	truncated bool
 }
 
 // NewLogBroadcaster creates a log broadcaster that writes to the given filePath.
@@ -37,7 +40,23 @@ func (b *LogBroadcaster) Write(p []byte) (n int, err error) {
 		return 0, io.ErrClosedPipe
 	}
 
+	if b.truncated {
+		return len(p), nil
+	}
+	if b.size+int64(len(p)) > config.MaxLogBytes {
+		b.truncated = true
+		marker := []byte("\n[WARN] Build log size limit reached; further output omitted.\n")
+		_, err = b.file.Write(marker)
+		for ch := range b.listeners {
+			select {
+			case ch <- string(marker):
+			default:
+			}
+		}
+		return len(p), err
+	}
 	n, err = b.file.Write(p)
+	b.size += int64(n)
 	str := string(p)
 
 	for ch := range b.listeners {
@@ -92,4 +111,57 @@ func (b *LogBroadcaster) Close() error {
 	}
 
 	return b.file.Close()
+}
+
+// SubscribeWithHistory snapshots disk output and registers a listener under one lock.
+func (b *LogBroadcaster) SubscribeWithHistory() (chan string, []string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	data, err := readLog(b.file.Name())
+	if err != nil {
+		return nil, nil, err
+	}
+	ch := make(chan string, 100)
+	if b.closed {
+		close(ch)
+	} else {
+		b.listeners[ch] = struct{}{}
+	}
+	return ch, []string{string(data)}, nil
+}
+
+// limitedWriter drains excess command output without growing disk or memory use.
+// Stdout and stderr may call Write concurrently.
+type limitedWriter struct {
+	mu        sync.Mutex
+	writer    io.Writer
+	remaining int64
+	truncated bool
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	size := len(p)
+	if int64(size) > w.remaining {
+		p = p[:int(w.remaining)]
+		w.truncated = true
+	}
+	n, err := w.writer.Write(p)
+	w.remaining -= int64(n)
+	if err != nil {
+		return n, err
+	}
+	if n != len(p) {
+		return n, io.ErrShortWrite
+	}
+	return size, nil
+}
+func readLog(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, config.MaxLogBytes+128))
 }

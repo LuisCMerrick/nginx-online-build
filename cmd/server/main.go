@@ -1,7 +1,7 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"log"
 	"net"
 	"net/http"
@@ -11,7 +11,10 @@ import (
 	"nginx-builder/internal/handler"
 	"nginx-builder/web"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 )
 
 func main() {
@@ -32,14 +35,16 @@ func main() {
 	log.Printf("Target bind address:   http://%s%s", addr, cfg.BasePath)
 
 	if cfg.AuthEnabled {
-		accessURL := fmt.Sprintf("http://%s%s/?key=%s", addr, cfg.BasePath, cfg.AuthKey)
-		log.Printf("--------------------------------------------------")
-		log.Printf("🔐 URL Authentication: ENABLED (default on)")
-		log.Printf("🔑 Access Auth Key:    %s", cfg.AuthKey)
-		log.Printf("🔗 Direct Access URL:  %s", accessURL)
+		log.Printf("Authentication enabled; open the entry page to sign in")
+		if cfg.AuthKeyGenerated {
+			log.Printf("Generated access key (this process only): %s", cfg.AuthKey)
+		} else {
+			log.Printf("Using configured access key (not printed)")
+		}
 	} else {
-		log.Printf("🔓 URL Authentication: DISABLED (--no-auth)")
+		log.Printf("Authentication disabled (--no-auth)")
 	}
+
 	log.Printf("--------------------------------------------------")
 
 	mgr := builder.NewManager(cfg)
@@ -93,8 +98,30 @@ func main() {
 	// Wrap root router with URL Access Authentication Middleware
 	serverHandler := auth.Middleware(cfg, mux)
 
-	if err := http.ListenAndServe(addr, serverHandler); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("Server terminated with error: %v", err)
+	server := &http.Server{Addr: addr, Handler: serverHandler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
+	stop, release := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer release()
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- server.ListenAndServe() }()
+	failed := false
+	select {
+	case err := <-serverErr:
+		if err != nil && err != http.ErrServerClosed {
+			log.Printf("Server error: %v", err)
+			failed = true
+		}
+	case <-stop.Done():
+	}
+	shutdown, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := mgr.Shutdown(shutdown); err != nil {
+		log.Printf("Worker shutdown: %v", err)
+	}
+	if err := server.Shutdown(shutdown); err != nil {
+		log.Printf("HTTP shutdown: %v", err)
+		_ = server.Close()
+	}
+	if failed {
 		os.Exit(1)
 	}
 }

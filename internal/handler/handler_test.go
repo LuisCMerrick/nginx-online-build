@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"nginx-builder/internal/config"
+	"nginx-builder/internal/model"
+	"strings"
 	"testing"
 )
 
@@ -61,5 +64,32 @@ func TestParseBuildRequestPath(t *testing.T) {
 				t.Fatalf("parseBuildRequestPath(%q) = (%q, %q, %v), want (%q, %q, %v)", tt.path, buildID, action, ok, tt.buildID, tt.action, tt.shouldParse)
 			}
 		})
+	}
+}
+
+func TestStrictJSONAndRequestBodyLimit(t *testing.T) {
+	for _, tc := range []struct {
+		body   string
+		status int
+	}{
+		{`{"versoin":"stable"}`, 400},
+		{`{"third_party_sources":{"unknown":true}}`, 400},
+		{`{} {}`, 400},
+		{`{"version":"` + strings.Repeat("x", int(config.MaxRequestBytes)) + `"}`, 413},
+		{`{"version":"stable"}`, 0},
+	} {
+		// Negative content length simulates a chunked body without an advertised size.
+		r := httptest.NewRequest("POST", "/api/builds", strings.NewReader(tc.body))
+		r.ContentLength = -1
+		w := httptest.NewRecorder()
+		var req model.CreateBuildRequest
+		ok := decodeRequest(w, r, &req)
+		if tc.status == 0 {
+			if !ok || req.Version != "stable" {
+				t.Fatal("valid request rejected")
+			}
+		} else if ok || w.Code != tc.status {
+			t.Fatalf("status=%d want=%d body=%s", w.Code, tc.status, w.Body)
+		}
 	}
 }
