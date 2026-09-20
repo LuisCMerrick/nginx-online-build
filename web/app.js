@@ -127,6 +127,7 @@ function initEventListeners() {
 
   // Start Build
   document.getElementById("start-build-btn").addEventListener("click", startBuild);
+  document.getElementById("cancel-build-btn").addEventListener("click", cancelActiveBuild);
 
   // Terminal Controls
   document.getElementById("clear-term-btn").addEventListener("click", () => {
@@ -590,6 +591,8 @@ async function doSubmitBuild(autoResolve) {
 
 // Watch Active Build
 function watchBuild(buildId) {
+  activeBuildId = buildId;
+  document.getElementById("cancel-build-btn").classList.add("hidden");
   document.getElementById("terminal-body").textContent = "";
   document.getElementById("artifact-card").classList.add("hidden");
   document.getElementById("val-build-id").textContent = buildId;
@@ -598,22 +601,24 @@ function watchBuild(buildId) {
     logEventSource.close();
   }
 
-  logEventSource = new EventSource(window.apiUrl(`/api/builds/${buildId}/logs?stream=true`));
+  const source = new EventSource(window.apiUrl(`/api/builds/${buildId}/logs?stream=true`));
+  logEventSource = source;
   const term = document.getElementById("terminal-body");
   const autoscroll = document.getElementById("autoscroll-chk");
 
-  logEventSource.onmessage = (e) => {
-    term.textContent += e.data + "\n";
+  source.onmessage = (e) => {
+    if (activeBuildId !== buildId) return;
+    term.textContent = (term.textContent + e.data + "\n").slice(-1024 * 1024);
     if (autoscroll.checked) {
       term.scrollTop = term.scrollHeight;
     }
   };
 
-  logEventSource.addEventListener("done", () => {
-    logEventSource.close();
+  source.addEventListener("done", () => {
+    source.close();
   });
 
-  logEventSource.onerror = () => {};
+  source.onerror = () => {};
 
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(() => checkJobStatus(buildId), 1500);
@@ -624,18 +629,20 @@ async function checkJobStatus(buildId) {
   try {
     const resp = await fetch(window.apiUrl(`/api/builds/${buildId}`));
     const data = await resp.json();
-    if (!data.success || !data.build) return;
+    if (activeBuildId !== buildId) return;
+    if (!data.success || !data.build) {
+      if (resp.status === 404) finishWatchingBuild();
+      return;
+    }
 
     const b = data.build;
     updatePipelineUI(b);
 
-    if (b.status === "completed" || b.status === "failed") {
-      clearInterval(pollTimer);
+    const terminal = ["completed", "failed", "cancelled"].includes(b.status);
+    document.getElementById("cancel-build-btn").classList.toggle("hidden", terminal);
+    if (terminal) {
+      finishWatchingBuild();
       loadRecentBuilds();
-
-      const btn = document.getElementById("start-build-btn");
-      btn.disabled = false;
-      btn.innerHTML = `<span class="btn-icon">⚡</span><span class="btn-text">${t("btn_start_build", "Build Nginx Now")}</span>`;
 
       if (b.status === "completed" && b.artifact) {
         showArtifactCard(b);
@@ -643,6 +650,33 @@ async function checkJobStatus(buildId) {
     }
   } catch (err) {
     console.error("Query build status failed:", err);
+  }
+}
+
+function finishWatchingBuild() {
+  clearInterval(pollTimer);
+  pollTimer = null;
+  if (logEventSource) logEventSource.close();
+  document.getElementById("cancel-build-btn").classList.add("hidden");
+  const btn = document.getElementById("start-build-btn");
+  btn.disabled = false;
+  btn.innerHTML = `<span class="btn-icon">⚡</span><span class="btn-text">${t("btn_start_build", "Build Nginx Now")}</span>`;
+}
+
+async function cancelActiveBuild() {
+  if (!activeBuildId) return;
+  const buildId = activeBuildId;
+  const btn = document.getElementById("cancel-build-btn");
+  btn.disabled = true;
+  try {
+    const resp = await fetch(window.apiUrl(`/api/builds/${buildId}/cancel`), { method: "POST" });
+    const data = await resp.json();
+    if (!data.success) alert(data.error || t("cancel_error", "Unable to cancel build"));
+    await checkJobStatus(buildId);
+  } catch (err) {
+    alert(err.message);
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -656,7 +690,8 @@ function updatePipelineUI(b) {
     building: t("step_building", "Compiling"),
     packaging: t("step_packaging", "Verification"),
     completed: t("step_completed", "Completed"),
-    failed: t("step_failed", "Failed")
+    failed: t("step_failed", "Failed"),
+    cancelled: t("step_cancelled", "Cancelled")
   };
   pill.textContent = statusLabels[b.status] || b.status;
 

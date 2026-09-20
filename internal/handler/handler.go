@@ -2,9 +2,12 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"nginx-builder/internal/builder"
+	"nginx-builder/internal/config"
 	"nginx-builder/internal/model"
 	"nginx-builder/internal/nginx"
 	"nginx-builder/internal/system"
@@ -51,7 +54,7 @@ func (h *Handler) handleGetVersions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	versions := nginx.GetVersions()
+	versions := nginx.GetVersionsContext(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":  true,
 		"versions": versions,
@@ -109,12 +112,11 @@ func (h *Handler) handlePreview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req model.PreviewRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "无效的请求格式"})
+	if !decodeRequest(w, r, &req) {
 		return
 	}
 
-	verInfo, err := nginx.GetVersion(req.Version)
+	verInfo, err := nginx.GetVersionContext(r.Context(), req.Version)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
 		return
@@ -155,14 +157,21 @@ func (h *Handler) handleBuilds(w http.ResponseWriter, r *http.Request) {
 		})
 	case http.MethodPost:
 		var req model.CreateBuildRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "请求体 JSON 格式不合法"})
+		if !decodeRequest(w, r, &req) {
 			return
 		}
 
 		job, err := h.mgr.CreateJob(&req)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+			status := http.StatusBadRequest
+			if errors.Is(err, builder.ErrQueueFull) {
+				status = http.StatusTooManyRequests
+				w.Header().Set("Retry-After", "5")
+			}
+			if errors.Is(err, builder.ErrShuttingDown) {
+				status = http.StatusServiceUnavailable
+			}
+			writeJSON(w, status, map[string]any{"success": false, "error": err.Error()})
 			return
 		}
 
@@ -208,7 +217,7 @@ func parseBuildRequestPath(path string) (buildID, action string, ok bool) {
 	}
 
 	parts := strings.Split(strings.Trim(path[index+len(buildsPrefix):], "/"), "/")
-	if len(parts) == 0 || parts[0] == "" {
+	if len(parts) == 0 || len(parts) > 2 || parts[0] == "" {
 		return "", "", false
 	}
 	if len(parts) > 1 {
@@ -251,7 +260,7 @@ func (h *Handler) handleGetBuild(w http.ResponseWriter, r *http.Request, buildID
 	}
 
 	// Calculate live duration if still running
-	if job.Status != model.StatusCompleted && job.Status != model.StatusFailed {
+	if !model.IsTerminal(job.Status) {
 		job.DurationSeconds = time.Since(job.StartTime).Seconds()
 	}
 
@@ -273,9 +282,14 @@ func (h *Handler) handleGetLogs(w http.ResponseWriter, r *http.Request, buildID 
 
 	ch, history, err := h.mgr.SubscribeLogs(buildID)
 	if err != nil {
+		if _, ok := h.mgr.GetJob(buildID); !ok {
+			http.NotFound(w, r)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	defer h.mgr.UnsubscribeLogs(buildID, ch)
 
 	if !isSSE {
 		// Return all logs as plain text
@@ -283,7 +297,6 @@ func (h *Handler) handleGetLogs(w http.ResponseWriter, r *http.Request, buildID 
 		for _, chunk := range history {
 			_, _ = w.Write([]byte(chunk))
 		}
-		h.mgr.UnsubscribeLogs(buildID, ch)
 		return
 	}
 
@@ -309,8 +322,6 @@ func (h *Handler) handleGetLogs(w http.ResponseWriter, r *http.Request, buildID 
 		}
 	}
 	flusher.Flush()
-
-	defer h.mgr.UnsubscribeLogs(buildID, ch)
 
 	// Stream live lines
 	notify := r.Context().Done()
@@ -475,4 +486,31 @@ func (h *Handler) handleSystemDepsLogs(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+func decodeRequest(w http.ResponseWriter, r *http.Request, value any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, config.MaxRequestBytes)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	err := decoder.Decode(value)
+	if err == nil {
+		var extra any
+		if trailing := decoder.Decode(&extra); trailing != io.EOF {
+			if trailing == nil {
+				err = fmt.Errorf("exactly one JSON object is required")
+			} else {
+				err = trailing
+			}
+		}
+	}
+	if err == nil {
+		return true
+	}
+	status := http.StatusBadRequest
+	var limitErr *http.MaxBytesError
+	if errors.As(err, &limitErr) {
+		status = http.StatusRequestEntityTooLarge
+	}
+	writeJSON(w, status, map[string]any{"success": false, "error": err.Error()})
+	return false
 }

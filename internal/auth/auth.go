@@ -6,131 +6,239 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"nginx-builder/internal/config"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	// CookieName is the standard cookie storing client auth credential
-	CookieName = "nginx_builder_key"
-	// QueryParamKey represents URL parameter ?key=
-	QueryParamKey = "key"
-	// QueryParamToken represents URL parameter ?token=
+	CookieName      = "nginx_builder_session"
+	QueryParamKey   = "key"
 	QueryParamToken = "token"
-	// QueryParamAuth represents URL parameter ?auth=
-	QueryParamAuth = "auth"
-	// HeaderAuthKey is the HTTP request header for API clients
-	HeaderAuthKey = "X-Auth-Key"
+	QueryParamAuth  = "auth"
+	HeaderAuthKey   = "X-Auth-Key"
+	sessionLifetime = 12 * time.Hour
+	maxSessions     = 1024
 )
 
-// GenerateRandomKey creates a cryptographically secure 16-byte (32 hex characters) secret key.
-func GenerateRandomKey() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("nb_%d", time.Now().UnixNano())
-	}
-	return hex.EncodeToString(b)
+type sessionStore struct {
+	sync.Mutex
+	sessions map[string]time.Time
 }
 
-// Middleware wraps an http.Handler to enforce URL / Cookie / Header authentication.
-func Middleware(cfg *config.Config, next http.Handler) http.Handler {
-	if !cfg.AuthEnabled {
-		return next
+func (s *sessionStore) create() (string, error) {
+	key, err := randomKey()
+	if err != nil {
+		return "", err
 	}
+	s.Lock()
+	defer s.Unlock()
+	now := time.Now()
+	for token, expiry := range s.sessions {
+		if !expiry.After(now) {
+			delete(s.sessions, token)
+		}
+	}
+	if len(s.sessions) >= maxSessions {
+		var oldest string
+		var expiry time.Time
+		for token, t := range s.sessions {
+			if oldest == "" || t.Before(expiry) {
+				oldest = token
+				expiry = t
+			}
+		}
+		delete(s.sessions, oldest)
+	}
+	s.sessions[key] = now.Add(sessionLifetime)
+	return key, nil
+}
+func (s *sessionStore) valid(key string) bool {
+	s.Lock()
+	defer s.Unlock()
+	expiry, ok := s.sessions[key]
+	if !ok {
+		return false
+	}
+	if !expiry.After(time.Now()) {
+		delete(s.sessions, key)
+		return false
+	}
+	return true
+}
+func (s *sessionStore) remove(key string) { s.Lock(); delete(s.sessions, key); s.Unlock() }
+func randomKey() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
 
+func Middleware(cfg *config.Config, next http.Handler) http.Handler {
+	sessions := &sessionStore{sessions: make(map[string]time.Time)}
+	path := cfg.BasePath
+	if path == "" {
+		path = "/"
+	}
+	setCookie := func(w http.ResponseWriter, r *http.Request, key string, maxAge int) {
+		http.SetCookie(w, &http.Cookie{Name: CookieName, Value: key, Path: path, HttpOnly: true, Secure: cfg.CookieSecure || r.TLS != nil, SameSite: http.SameSiteLaxMode, MaxAge: maxAge})
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		providedKey := ExtractKey(r)
-		if ValidateKey(providedKey, cfg.AuthKey) {
-			// If authenticated via URL query or header, set cookie so subsequent browser requests don't need ?key=
-			if c, err := r.Cookie(CookieName); err != nil || c.Value != cfg.AuthKey {
-				cookiePath := "/"
-				if cfg.BasePath != "" {
-					cookiePath = cfg.BasePath
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if r.ContentLength > config.MaxRequestBytes {
+			authJSON(w, http.StatusRequestEntityTooLarge, false, "request body too large")
+			return
+		}
+		route := r.URL.Path
+		if cfg.BasePath != "" {
+			route = strings.TrimPrefix(route, cfg.BasePath)
+		}
+		if route == "/api/auth/login" || route == "/api/auth/logout" {
+			w.Header().Set("Cache-Control", "no-store")
+			if r.Method != http.MethodPost {
+				w.Header().Set("Allow", "POST")
+				authJSON(w, http.StatusMethodNotAllowed, false, "POST required")
+				return
+			}
+			if !sameOrigin(r, cfg.CookieSecure) {
+				authJSON(w, http.StatusForbidden, false, "cross-origin request rejected")
+				return
+			}
+			if route == "/api/auth/logout" {
+				if cookie, err := r.Cookie(CookieName); err == nil {
+					sessions.remove(cookie.Value)
 				}
-				http.SetCookie(w, &http.Cookie{
-					Name:     CookieName,
-					Value:    cfg.AuthKey,
-					Path:     cookiePath,
-					HttpOnly: false, // allow client-side scripts to read/maintain session
-					SameSite: http.SameSiteLaxMode,
-					MaxAge:   86400 * 30, // 30 days
-				})
+				setCookie(w, r, "", -1)
+				authJSON(w, http.StatusOK, true, "")
+				return
+			}
+			if !cfg.AuthEnabled {
+				authJSON(w, http.StatusOK, true, "")
+				return
+			}
+			var payload struct {
+				Key string `json:"key"`
+			}
+			decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&payload); err != nil {
+				authJSON(w, http.StatusBadRequest, false, "invalid login payload")
+				return
+			}
+			var extra any
+			if err := decoder.Decode(&extra); err != io.EOF {
+				authJSON(w, http.StatusBadRequest, false, "invalid login payload")
+				return
+			}
+			if !ValidateKey(strings.TrimSpace(payload.Key), cfg.AuthKey) {
+				authJSON(w, http.StatusUnauthorized, false, "invalid access key")
+				return
+			}
+			session, err := sessions.create()
+			if err != nil {
+				authJSON(w, http.StatusServiceUnavailable, false, "cannot create session")
+				return
+			}
+			setCookie(w, r, session, int(sessionLifetime.Seconds()))
+			// Expire the old raw-key cookie on migration. It is never accepted for authentication.
+			http.SetCookie(w, &http.Cookie{Name: "nginx_builder_key", Path: path, MaxAge: -1, HttpOnly: true, Secure: cfg.CookieSecure || r.TLS != nil})
+			authJSON(w, http.StatusOK, true, "")
+			return
+		}
+		if !cfg.AuthEnabled {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		if ValidateKey(headerKey(r), cfg.AuthKey) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		query := r.URL.Query()
+		queryKey := query.Get(QueryParamKey)
+		if queryKey == "" {
+			queryKey = query.Get(QueryParamToken)
+		}
+		if queryKey == "" {
+			queryKey = query.Get(QueryParamAuth)
+		}
+		if queryKey != "" && ValidateKey(strings.TrimSpace(queryKey), cfg.AuthKey) {
+			// URL keys are an entry-point login mechanism; APIs use headers or a session.
+			if r.Method == http.MethodGet && !isAPIRequest(r.URL.Path, cfg.BasePath) {
+				session, err := sessions.create()
+				if err != nil {
+					authJSON(w, http.StatusServiceUnavailable, false, "cannot create session")
+					return
+				}
+				setCookie(w, r, session, int(sessionLifetime.Seconds()))
+				query.Del(QueryParamKey)
+				query.Del(QueryParamToken)
+				query.Del(QueryParamAuth)
+				target := "/" + strings.TrimLeft(r.URL.EscapedPath(), "/")
+				if query.Encode() != "" {
+					target += "?" + query.Encode()
+				}
+				http.Redirect(w, r, target, http.StatusSeeOther)
+				return
+			}
+		}
+		if cookie, err := r.Cookie(CookieName); err == nil && sessions.valid(cookie.Value) {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead && !sameOrigin(r, cfg.CookieSecure) {
+				authJSON(w, http.StatusForbidden, false, "cross-origin request rejected")
+				return
 			}
 			next.ServeHTTP(w, r)
 			return
 		}
-
-		// Check if it's an API request or SSE stream
-		isAPI := isAPIRequest(r.URL.Path, cfg.BasePath)
-		isSSE := strings.Contains(r.Header.Get("Accept"), "text/event-stream") || r.URL.Query().Get("stream") == "true"
-
-		if isAPI || isSSE {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(http.StatusUnauthorized)
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"success": false,
-				"error":   "401 Unauthorized: missing or invalid access key. Append ?key=<key> or provide X-Auth-Key header.",
-			})
+		if isAPIRequest(r.URL.Path, cfg.BasePath) || strings.Contains(r.Header.Get("Accept"), "text/event-stream") || query.Get("stream") == "true" {
+			authJSON(w, http.StatusUnauthorized, false, "authentication required: use X-Auth-Key or a browser session")
 			return
 		}
-
-		// Render stylish 401 Auth Challenge UI for browser visitors
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(renderAuthChallengeHTML(cfg.BasePath)))
+		_, _ = w.Write([]byte(renderAuthChallengeHTML(cfg.BasePath)))
 	})
 }
 
-// ExtractKey extracts authentication key from URL query, Cookies, or HTTP Headers.
-func ExtractKey(r *http.Request) string {
-	// 1. URL Query parameter (?key=..., ?token=..., ?auth=...)
-	if k := r.URL.Query().Get(QueryParamKey); k != "" {
-		return strings.TrimSpace(k)
+func headerKey(r *http.Request) string {
+	if key := r.Header.Get(HeaderAuthKey); key != "" {
+		return strings.TrimSpace(key)
 	}
-	if k := r.URL.Query().Get(QueryParamToken); k != "" {
-		return strings.TrimSpace(k)
+	if key := r.Header.Get("Authorization"); strings.HasPrefix(key, "Bearer ") {
+		return strings.TrimSpace(strings.TrimPrefix(key, "Bearer "))
 	}
-	if k := r.URL.Query().Get(QueryParamAuth); k != "" {
-		return strings.TrimSpace(k)
-	}
-
-	// 2. Cookie
-	if c, err := r.Cookie(CookieName); err == nil && c.Value != "" {
-		return strings.TrimSpace(c.Value)
-	}
-
-	// 3. HTTP Header (X-Auth-Key or Authorization: Bearer <key>)
-	if h := r.Header.Get(HeaderAuthKey); h != "" {
-		return strings.TrimSpace(h)
-	}
-	if auth := r.Header.Get("Authorization"); auth != "" {
-		if strings.HasPrefix(auth, "Bearer ") {
-			return strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
-		}
-	}
-
 	return ""
 }
-
-// ValidateKey compares the provided key with expected key in constant time to prevent timing attacks.
 func ValidateKey(provided, expected string) bool {
-	if provided == "" || expected == "" {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+	return provided != "" && expected != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
 }
-
 func isAPIRequest(path, basePath string) bool {
-	if strings.HasPrefix(path, "/api/") {
-		return true
-	}
-	if basePath != "" && strings.HasPrefix(path, basePath+"/api/") {
-		return true
-	}
-	return false
+	return strings.HasPrefix(path, "/api/") || basePath != "" && strings.HasPrefix(path, basePath+"/api/")
 }
+func sameOrigin(r *http.Request, secure bool) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return r.Header.Get("Sec-Fetch-Site") != "cross-site"
+	}
+	u, err := url.Parse(origin)
+	return err == nil && strings.EqualFold(u.Host, r.Host) && (u.Scheme == "http" || u.Scheme == "https") && (!(secure || r.TLS != nil) || u.Scheme == "https")
+}
+func authJSON(w http.ResponseWriter, status int, success bool, message string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	result := map[string]any{"success": success}
+	if message != "" {
+		result["error"] = message
+	}
+	_ = json.NewEncoder(w).Encode(result)
+}
+func jsonString(s string) string { value, _ := json.Marshal(s); return string(value) }
 
 // renderAuthChallengeHTML returns a modern dark-themed authentication challenge page.
 func renderAuthChallengeHTML(basePath string) string {
@@ -284,32 +392,32 @@ func renderAuthChallengeHTML(basePath string) string {
 
     <div class="hint-box">
       💡 <strong>快捷访问提示：</strong><br>
-      服务启动时已在终端控制台打印专属鉴权链接，形如：<br>
-      <code>?key=&lt;auth_key&gt;</code>，直接点击链接即可免密快速登录。
+      请输入管理员配置的访问密钥。<br>
+      未配置固定密钥时，可在本次服务启动日志中查看自动生成的密钥。
     </div>
   </div>
 
   <script>
-    const basePath = "%s";
-    const redirectTarget = "%s";
-
-    document.getElementById("auth-form").addEventListener("submit", function(e) {
+    const basePath = %s;
+    const redirectTarget = %s;
+    try { localStorage.removeItem("nginx_builder_key"); } catch (_) {}
+    document.getElementById("auth-form").addEventListener("submit", async function(e) {
       e.preventDefault();
-      const key = document.getElementById("key-input").value.trim();
-      if (!key) {
-        document.getElementById("error-msg").style.display = "block";
-        return;
-      }
-      // Save cookie and redirect with ?key= to establish full session
-      const cookiePath = basePath || "/";
-      document.cookie = "%s=" + encodeURIComponent(key) + "; path=" + cookiePath + "; max-age=2592000; SameSite=Lax";
-      
-      let target = redirectTarget;
-      target += (target.includes("?") ? "&" : "?") + "key=" + encodeURIComponent(key);
-      window.location.href = target;
+      const input = document.getElementById("key-input");
+      const error = document.getElementById("error-msg");
+      try {
+        const response = await fetch(basePath + "/api/auth/login", {
+          method: "POST", credentials: "same-origin",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({key: input.value.trim()})
+        });
+        input.value = "";
+        if (!response.ok) throw new Error("Invalid key or session unavailable");
+        window.location.replace(redirectTarget);
+      } catch (_) { error.style.display = "block"; }
     });
   </script>
 </body>
 </html>
-`, basePath, redirectPath, CookieName)
+`, jsonString(basePath), jsonString(redirectPath))
 }

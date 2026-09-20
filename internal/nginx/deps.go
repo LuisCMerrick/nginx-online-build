@@ -1,15 +1,13 @@
 package nginx
 
 import (
+	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
-	"net/http"
+	"net/url"
 	"nginx-builder/internal/model"
 	"nginx-builder/internal/safenet"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -99,8 +97,8 @@ func validateDepVersion(version string) error {
 // ResolveDepSource resolves a library's download URL and expected SHA256.
 func ResolveDepSource(libName, version, customURL string) (*model.DepLibraryInfo, error) {
 	if customURL != "" {
-		matched, _ := regexp.MatchString(`^https?://`, customURL)
-		if !matched {
+		parsed, parseErr := url.Parse(customURL)
+		if parseErr != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 			return nil, fmt.Errorf("自定义 %s 源码 URL 必须以 http:// 或 https:// 开头", libName)
 		}
 		ver := strings.TrimSpace(version)
@@ -152,129 +150,24 @@ func ResolveDepSource(libName, version, customURL string) (*model.DepLibraryInfo
 	return nil, fmt.Errorf("未找到预设的 %s 版本: %s", libName, version)
 }
 
-// DownloadAndVerifyDep downloads a third-party library tarball and returns the downloaded file path and SHA256.
-// It uses singleflight to deduplicate concurrent downloads and enforces SSRF defenses.
-func DownloadAndVerifyDep(destDir string, info *model.DepLibraryInfo, cacheDir string, logWriter io.Writer) (string, string, error) {
-	if err := validateDepVersion(info.Version); err != nil {
-		return "", "", fmt.Errorf("安全拦截: %w", err)
-	}
-
-	cacheKey := fmt.Sprintf("dep:%s:%s:%s", info.Name, info.Version, info.SourceURL)
-	val, err := downloadGroup.Do(cacheKey, func() (any, error) {
-		return downloadAndVerifyDepInternal(info, cacheDir, logWriter)
-	})
-	if err != nil {
-		return "", "", err
-	}
-
-	res := val.([]string)
-	cachePath := res[0]
-	hash := res[1]
-
-	safeVer := filepath.Base(info.Version)
-	destFileName := fmt.Sprintf("%s-%s.tar.gz", info.Name, safeVer)
-	cleanDestDir := filepath.Clean(destDir)
-	destPath := filepath.Clean(filepath.Join(cleanDestDir, destFileName))
-	relDest, err := filepath.Rel(cleanDestDir, destPath)
-	if err != nil || relDest == ".." || strings.HasPrefix(relDest, ".."+string(filepath.Separator)) {
-		return "", "", fmt.Errorf("安全拦截: 依赖包目标路径存在越界逃逸风险")
-	}
-	if err := copyFile(cachePath, destPath); err != nil {
-		return "", "", fmt.Errorf("复制依赖包到工作区失败: %w", err)
-	}
-
-	return destPath, hash, nil
+// DownloadAndVerifyDep is the synchronous compatibility entry point.
+func DownloadAndVerifyDep(destDir string, info *model.DepLibraryInfo, cacheDir string, writer io.Writer) (string, string, error) {
+	return DownloadAndVerifyDepContext(context.Background(), destDir, info, cacheDir, DownloadLimits{}, writer)
 }
-
-func downloadAndVerifyDepInternal(info *model.DepLibraryInfo, cacheDir string, logWriter io.Writer) ([]string, error) {
+func DownloadAndVerifyDepContext(ctx context.Context, destDir string, info *model.DepLibraryInfo, cacheDir string, limits DownloadLimits, writer io.Writer) (string, string, error) {
+	if info == nil {
+		return "", "", fmt.Errorf("invalid dependency")
+	}
+	if info.Name != "openssl" && info.Name != "pcre" && info.Name != "zlib" {
+		return "", "", fmt.Errorf("invalid dependency library")
+	}
 	if err := validateDepVersion(info.Version); err != nil {
-		return nil, fmt.Errorf("安全拦截: %w", err)
+		return "", "", fmt.Errorf("invalid dependency version: %w", err)
 	}
-
-	safeVer := filepath.Base(info.Version)
-	fileName := fmt.Sprintf("%s-%s.tar.gz", info.Name, safeVer)
-	if info.Version == "custom" || info.ExpectedSHA == "" {
+	name := fmt.Sprintf("%s-%s.tar.gz", info.Name, info.Version)
+	if info.ExpectedSHA == "" {
 		sum := sha256.Sum256([]byte(info.SourceURL))
-		fileName = fmt.Sprintf("%s-%s-%s.tar.gz", info.Name, safeVer, hex.EncodeToString(sum[:])[:8])
+		name = fmt.Sprintf("%s-%s-%x.tar.gz", info.Name, info.Version, sum)
 	}
-	cleanCacheDir := filepath.Clean(cacheDir)
-	cachePath := filepath.Clean(filepath.Join(cleanCacheDir, fileName))
-	relCache, err := filepath.Rel(cleanCacheDir, cachePath)
-	if err != nil || relCache == ".." || strings.HasPrefix(relCache, ".."+string(filepath.Separator)) {
-		return nil, fmt.Errorf("安全拦截: 依赖包缓存路径存在越界逃逸风险")
-	}
-
-	_ = os.MkdirAll(cacheDir, 0755)
-
-	// Check local cache
-	if _, err := os.Stat(cachePath); err == nil {
-		hash, err := fileSHA256(cachePath)
-		if err == nil {
-			if info.ExpectedSHA == "" || hash == info.ExpectedSHA {
-				if logWriter != nil {
-					fmt.Fprintf(logWriter, "[DepCache] 从本地缓存命中依赖库: %s (%s, SHA256: %s)\n", info.Name, info.Version, hash)
-				}
-				return []string{cachePath, hash}, nil
-			}
-		}
-	}
-
-	if err := safenet.ValidateURLHost(info.SourceURL); err != nil {
-		return nil, fmt.Errorf("依赖库下载地址安全拦截: %w", err)
-	}
-
-	if logWriter != nil {
-		fmt.Fprintf(logWriter, "[DepSource] 正在下载第三方依赖库 %s (%s): %s\n", info.Name, info.Version, info.SourceURL)
-	}
-
-	client := safenet.NewSafeHTTPClient(90 * time.Second)
-	resp, err := client.Get(info.SourceURL)
-	if err != nil {
-		return nil, fmt.Errorf("下载依赖包 %s 失败: %w", info.Name, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("下载依赖包 %s HTTP 异常: %s", info.Name, resp.Status)
-	}
-
-	tmpPath := fmt.Sprintf("%s.tmp-%d", cachePath, time.Now().UnixNano())
-	out, err := os.Create(tmpPath)
-	if err != nil {
-		return nil, fmt.Errorf("创建临时缓存文件失败: %w", err)
-	}
-
-	hasher := sha256.New()
-	multiWriter := io.MultiWriter(out, hasher)
-
-	written, err := io.Copy(multiWriter, resp.Body)
-	out.Close()
-	if err != nil {
-		_ = os.Remove(tmpPath)
-		return nil, fmt.Errorf("写入依赖包 %s 失败: %w", info.Name, err)
-	}
-
-	actualSHA := hex.EncodeToString(hasher.Sum(nil))
-	if logWriter != nil {
-		fmt.Fprintf(logWriter, "[DepSource] %s 下载完成 (%d bytes)，SHA256: %s\n", info.Name, written, actualSHA)
-	}
-
-	if info.ExpectedSHA != "" {
-		if actualSHA != info.ExpectedSHA {
-			_ = os.Remove(tmpPath)
-			return nil, fmt.Errorf("依赖包 %s SHA256 校验不匹配: 期望 %s, 实际 %s", info.Name, info.ExpectedSHA, actualSHA)
-		}
-		if logWriter != nil {
-			fmt.Fprintf(logWriter, "[DepSource] ✔ 官方已知指纹校验通过 (SHA256: %s)\n", actualSHA)
-		}
-	} else if logWriter != nil {
-		fmt.Fprintf(logWriter, "[DepSource] ⚠️ 自定义依赖源码已计算校验和: %s (未绑定官方指纹清单)\n", actualSHA)
-	}
-
-	if err := os.Rename(tmpPath, cachePath); err != nil {
-		_ = copyFile(tmpPath, cachePath)
-		_ = os.Remove(tmpPath)
-	}
-
-	return []string{cachePath, actualSHA}, nil
+	return fetchSource(ctx, destDir, cacheDir, name, info.SourceURL, info.ExpectedSHA, limits, writer, safenet.NewSafeHTTPClient(90*time.Second))
 }

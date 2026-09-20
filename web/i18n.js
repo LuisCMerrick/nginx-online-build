@@ -18,28 +18,8 @@ function getAppBasePath() {
   return p;
 }
 
-function getAuthToken() {
-  if (typeof window === "undefined") return "";
-  try {
-    const params = new URLSearchParams(window.location.search);
-    const qKey = params.get("key") || params.get("token") || params.get("auth");
-    if (qKey) {
-      localStorage.setItem("nginx_builder_key", qKey);
-      if (window.history && window.history.replaceState) {
-        params.delete("key");
-        params.delete("token");
-        params.delete("auth");
-        const newQuery = params.toString() ? ("?" + params.toString()) : "";
-        const cleanUrl = window.location.pathname + newQuery + window.location.hash;
-        window.history.replaceState({}, document.title, cleanUrl);
-      }
-      return qKey;
-    }
-    return localStorage.getItem("nginx_builder_key") || "";
-  } catch (e) {
-    return "";
-  }
-}
+// Remove credentials persisted by older versions; sessions are now HttpOnly cookies.
+try { localStorage.removeItem("nginx_builder_key"); } catch (_) {}
 
 function apiUrl(path) {
   if (!path) return path;
@@ -49,19 +29,10 @@ function apiUrl(path) {
   const alreadyPrefixed = base && (clean === base || clean.startsWith(base + "/"));
   let full = base && !alreadyPrefixed ? (base + clean) : clean;
 
-  // If token is present, append to API and locales URLs as secondary fallback
-  const token = getAuthToken();
-  if (token && (full.includes("/api/") || full.includes("/locales/"))) {
-    const sep = full.includes("?") ? "&" : "?";
-    if (!full.includes("key=") && !full.includes("token=") && !full.includes("auth=")) {
-      full += sep + "key=" + encodeURIComponent(token);
-    }
-  }
   return full;
 }
 
 window.getAppBasePath = getAppBasePath;
-window.getAuthToken = getAuthToken;
 window.apiUrl = apiUrl;
 
 const I18N_ENGINE = {

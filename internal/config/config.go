@@ -15,6 +15,15 @@ import (
 // AppVersion represents the current release version of Nginx Online Web Builder.
 const AppVersion = "1.0.0"
 
+const (
+	DefaultMaxQueuedJobs           = 16
+	DefaultMaxRetainedBuilds       = 20
+	DefaultMaxDownloadBytes  int64 = 256 << 20
+	DefaultMaxCacheBytes     int64 = 1024 << 20
+	MaxRequestBytes          int64 = 64 << 10
+	MaxLogBytes              int64 = 16 << 20
+)
+
 // Config encapsulates server runtime options, filesystem paths, and worker limits.
 type Config struct {
 	Host              string
@@ -27,6 +36,12 @@ type Config struct {
 	JobTimeout        time.Duration
 	AuthEnabled       bool
 	AuthKey           string
+	AuthKeyGenerated  bool
+	CookieSecure      bool
+	MaxQueuedJobs     int
+	MaxRetainedBuilds int
+	MaxDownloadBytes  int64
+	MaxCacheBytes     int64
 }
 
 // ParseCLI parses command-line flags, environment variables, and fallback defaults.
@@ -52,6 +67,11 @@ func ParseCLI(args []string) *Config {
 		fmt.Fprintf(os.Stderr, "  -j, --jobs <n>         Max concurrent compilation jobs (default: 2, env: MAX_CONCURRENT_JOBS)\n")
 		fmt.Fprintf(os.Stderr, "  -t, --timeout <min>    Job execution timeout in minutes (default: 20, env: JOB_TIMEOUT_MINUTES)\n")
 		fmt.Fprintf(os.Stderr, "  -v, --version          Display version information and exit\n")
+		fmt.Fprintf(os.Stderr, "      --cookie-secure       Require HTTPS for browser session cookies (env: COOKIE_SECURE)\n")
+		fmt.Fprintf(os.Stderr, "      --queue-limit <n>     Maximum waiting jobs (default: 16, env: MAX_QUEUED_JOBS)\n")
+		fmt.Fprintf(os.Stderr, "      --retain-builds <n>   Terminal job records to retain (default: 20, env: MAX_RETAINED_BUILDS)\n")
+		fmt.Fprintf(os.Stderr, "      --max-download-mb <n> Source archive limit in MiB (default: 256, env: MAX_DOWNLOAD_MB)\n")
+		fmt.Fprintf(os.Stderr, "      --max-cache-mb <n>    Source cache limit in MiB (default: 1024, env: MAX_CACHE_MB)\n")
 		fmt.Fprintf(os.Stderr, "      --help             Display this help message and exit\n\n")
 	}
 
@@ -102,18 +122,24 @@ func ParseCLI(args []string) *Config {
 	}
 
 	var (
-		hostFlag       string
-		portFlag       string
-		basePathFlag   string
-		authFlag       bool
-		noAuthFlag     bool
-		authKeyFlag    string
-		dataDirFlag    string
-		jobsFlag       int
-		timeoutFlag    int
-		versionFlag    bool
-		showHelpFlag   bool
+		hostFlag     string
+		portFlag     string
+		basePathFlag string
+		authFlag     bool
+		noAuthFlag   bool
+		authKeyFlag  string
+		dataDirFlag  string
+		jobsFlag     int
+		timeoutFlag  int
+		versionFlag  bool
+		showHelpFlag bool
 	)
+
+	queueLimit := fs.Int("queue-limit", positiveEnv("MAX_QUEUED_JOBS", DefaultMaxQueuedJobs), "Maximum waiting jobs")
+	retainBuilds := fs.Int("retain-builds", positiveEnv("MAX_RETAINED_BUILDS", DefaultMaxRetainedBuilds), "Completed job records to retain")
+	downloadMB := fs.Int("max-download-mb", positiveEnv("MAX_DOWNLOAD_MB", int(DefaultMaxDownloadBytes>>20)), "Maximum source archive MiB")
+	cacheMB := fs.Int("max-cache-mb", positiveEnv("MAX_CACHE_MB", int(DefaultMaxCacheBytes>>20)), "Maximum cached archive MiB")
+	cookieSecure := fs.Bool("cookie-secure", strings.EqualFold(os.Getenv("COOKIE_SECURE"), "true") || os.Getenv("COOKIE_SECURE") == "1", "Secure cookies behind an HTTPS reverse proxy")
 
 	fs.StringVar(&hostFlag, "host", envHost, "Listen address")
 	fs.StringVar(&hostFlag, "h", envHost, "Listen address (short)")
@@ -175,33 +201,42 @@ func ParseCLI(args []string) *Config {
 		authEnabled = false
 	}
 
+	if *queueLimit <= 0 || *retainBuilds <= 0 || *downloadMB <= 0 || *cacheMB < *downloadMB || *cacheMB > 1048576 {
+		fmt.Fprintln(os.Stderr, "Invalid resource limits: positive values required, cache >= download, cache <= 1048576 MiB")
+		os.Exit(2)
+	}
 	authKey := strings.TrimSpace(authKeyFlag)
+	authKeyGenerated := authEnabled && authKey == ""
 	if authEnabled && authKey == "" {
 		// Import will be handled or fallback token
 		authKey = GenerateDefaultAuthKey()
 	}
 
-	buildDir := filepath.Join(dataDirFlag, "builds")
-	cacheDir := filepath.Join(dataDirFlag, "cache")
-
-	if err := os.MkdirAll(buildDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to create build directory %s: %v\n", buildDir, err)
+	absData, err := PrepareDataDir(dataDirFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Cannot prepare data directory: %v\n", err)
+		os.Exit(2)
 	}
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to create cache directory %s: %v\n", cacheDir, err)
-	}
+	buildDir := filepath.Join(absData, "builds")
+	cacheDir := filepath.Join(absData, "cache")
 
 	return &Config{
 		Host:              hostFlag,
 		Port:              portFlag,
 		BasePath:          CleanBasePath(basePathFlag),
-		DataDir:           dataDirFlag,
+		DataDir:           absData,
 		BuildDir:          buildDir,
 		CacheDir:          cacheDir,
 		MaxConcurrentJobs: jobsFlag,
 		JobTimeout:        time.Duration(timeoutFlag) * time.Minute,
 		AuthEnabled:       authEnabled,
 		AuthKey:           authKey,
+		AuthKeyGenerated:  authKeyGenerated,
+		CookieSecure:      *cookieSecure,
+		MaxQueuedJobs:     *queueLimit,
+		MaxRetainedBuilds: *retainBuilds,
+		MaxDownloadBytes:  int64(*downloadMB) << 20,
+		MaxCacheBytes:     int64(*cacheMB) << 20,
 	}
 }
 
@@ -211,7 +246,7 @@ func GenerateDefaultAuthKey() string {
 	if _, err := rand.Read(b); err == nil {
 		return hex.EncodeToString(b)
 	}
-	return fmt.Sprintf("nb_%d_%d", time.Now().UnixNano(), os.Getpid())
+	panic("cryptographic random source unavailable")
 }
 
 // CleanBasePath normalizes URL subpath prefixes (e.g. "/nginx" or "" for root).
@@ -231,4 +266,38 @@ func CleanBasePath(p string) string {
 // LoadConfig maintains backward-compatibility by invoking ParseCLI with os.Args[1:].
 func LoadConfig() *Config {
 	return ParseCLI(os.Args[1:])
+}
+
+func positiveEnv(name string, fallback int) int {
+	if value, err := strconv.Atoi(os.Getenv(name)); err == nil && value > 0 {
+		return value
+	}
+	return fallback
+}
+
+// PrepareDataDir resolves paths before any child process changes its working directory.
+func PrepareDataDir(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	for _, dir := range []string{absolute, filepath.Join(absolute, "builds"), filepath.Join(absolute, "cache")} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return "", err
+		}
+		probe, err := os.CreateTemp(dir, ".write-check-*")
+		if err != nil {
+			return "", err
+		}
+		name := probe.Name()
+		err = probe.Close()
+		removeErr := os.Remove(name)
+		if err != nil {
+			return "", err
+		}
+		if removeErr != nil {
+			return "", removeErr
+		}
+	}
+	return absolute, nil
 }

@@ -3,10 +3,14 @@ package config_test
 import (
 	"nginx-builder/internal/config"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
 func TestParseCLI_AuthDefaultsAndFlags(t *testing.T) {
+	t.Setenv("DATA_DIR", t.TempDir())
+	t.Setenv("AUTH_KEY", "")
+	t.Setenv("AUTH_ENABLED", "true")
 	t.Run("Default configuration enables auth and generates random key", func(t *testing.T) {
 		cfg := config.ParseCLI([]string{})
 		if !cfg.AuthEnabled {
@@ -51,4 +55,24 @@ func TestParseCLI_AuthDefaultsAndFlags(t *testing.T) {
 			t.Fatalf("expected AuthEnabled to be false when AUTH_ENABLED=false")
 		}
 	})
+}
+
+func TestPrepareDataDir(t *testing.T) {
+	root := t.TempDir()
+	cwd, _ := os.Getwd()
+	relative, err := filepath.Rel(cwd, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := config.PrepareDataDir(relative)
+	if err != nil || !filepath.IsAbs(resolved) || resolved != root {
+		t.Fatalf("%s: %v", resolved, err)
+	}
+	file := filepath.Join(root, "file")
+	if err := os.WriteFile(file, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.PrepareDataDir(filepath.Join(file, "data")); err == nil {
+		t.Fatal("accepted unwritable data root")
+	}
 }
